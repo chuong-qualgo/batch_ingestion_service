@@ -76,6 +76,7 @@ with DAG(
         metric_config_raw=_METRIC_CONFIG,
         status="success",
         extra_payload={"pipeline": "postgres_to_hadoop"},
+        mongo_conn_id="mongo_checkpoint",
     )
 
     init >> spark_run >> metric_push

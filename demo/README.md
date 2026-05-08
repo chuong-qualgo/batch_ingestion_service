@@ -60,6 +60,18 @@ open http://localhost:8080
 
 ---
 
+## Data Viewer Services
+
+| Viewer | URL | Purpose | Credentials |
+|--------|-----|---------|-------------|
+| Mongo Express | http://localhost:8081 | Browse MongoDB documents | admin / admin_pass |
+| pgAdmin | http://localhost:5050 | Query PostgreSQL | admin@example.com / admin_pass |
+| Redis Commander | http://localhost:8082 | View Redis keys & streams | — |
+| Hadoop NameNode UI | http://localhost:9870 | HDFS file browser & metrics | — |
+| Hadoop DataNode UI | http://localhost:9864 | DataNode block status | — |
+
+---
+
 ## What the DAG does
 
 ```
