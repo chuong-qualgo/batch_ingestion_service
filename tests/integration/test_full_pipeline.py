@@ -110,10 +110,14 @@ def airflow_context():
     ti.xcom_push.side_effect = lambda key, value: xcom_store.update({key: value})
     ti.xcom_pull.side_effect = lambda task_ids=None, key=None: xcom_store.get(key)
 
+    dag_run = MagicMock()
+    dag_run.start_date = datetime(2024, 1, 15, 14, 30, 0)
+
     return {
         "dag":                  MagicMock(dag_id="test_pipeline"),
         "run_id":               "scheduled__2024-01-15T14:30:00",
         "data_interval_start":  datetime(2024, 1, 15, 14, 30, 0),
+        "dag_run":              dag_run,
         "ti":                   ti,
         "_xcom_store":          xcom_store,
     }

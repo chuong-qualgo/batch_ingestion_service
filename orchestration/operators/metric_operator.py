@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-import boto3
 from airflow.hooks.base import BaseHook
 from airflow.models import BaseOperator
+from pymongo import MongoClient
 from airflow.utils.context import Context
 
 from adapters.factory.adapter_config import AdapterConfig, MetricAdapterType
@@ -16,6 +17,7 @@ from adapters.metric.base_metric_adapter import (
     RedisMetricConfig,
     SQSMetricConfig,
 )
+from adapters.metric.redis_queue_adapter import RedisQueueAdapter
 from orchestration.plugins.openbao_hook import OpenBaoHook
 
 log = logging.getLogger(__name__)
@@ -63,6 +65,38 @@ def _build_metric_adapter(
     )
 
 
+def _push_redis_metric(
+    payload: dict,
+    redis_metric_config_raw: dict,
+    redis_metric_credentials: dict,
+) -> None:
+    """
+    Secondary Redis Streams push — publishes the pipeline event alongside the
+    MongoDB checkpoint save. Fire-and-forget: logs errors but does not re-raise.
+
+    Credentials (host, port, password) come from redis_metric_credentials,
+    which InitOperator fetches from OpenBao under redis_metric.credential_ref.
+    """
+    try:
+        config = RedisMetricConfig(
+            credential_ref=redis_metric_config_raw.get("credential_ref", ""),
+            host=redis_metric_credentials.get("host", redis_metric_config_raw.get("host", "")),
+            port=int(redis_metric_credentials.get("port", redis_metric_config_raw.get("port", 6379))),
+            stream_name=redis_metric_config_raw.get("stream_name", ""),
+            max_len=redis_metric_config_raw.get("max_len", 1000),
+        )
+        adapter = RedisQueueAdapter(
+            config=config,
+            credentials=redis_metric_credentials,
+            message_attributes=redis_metric_config_raw.get("message_attributes", {}),
+        )
+        adapter.validate_connection()
+        adapter.publish(payload)
+        log.info("[_push_redis_metric] Event published to Redis stream '%s'", config.stream_name)
+    except Exception as exc:
+        log.error("[_push_redis_metric] Failed to publish to Redis (non-fatal): %s", exc)
+
+
 def push_metric_inline(
     payload: dict,
     metric_type: MetricAdapterType,
@@ -94,20 +128,20 @@ def push_metric_inline(
 class MetricPushOperator(BaseOperator):
     """
     Standalone Airflow operator — publishes a pipeline completion metric
-    and saves checkpoint_to to DynamoDB.
+    and saves checkpoint_to to MongoDB.
 
     Execution steps
     ---------------
     1. Pull RunContext from XCom (written by InitOperator).
     2. Publish metric message to the configured queue (Redis or SQS).
-    3. Upsert checkpoint_to into DynamoDB keyed by dag_id.
+    3. Upsert checkpoint_to into MongoDB keyed by dag_id.
        Step 3 is skipped if checkpoint_to is None (no checkpoint_column
-       configured) or if dynamodb_conn_id / dynamodb_table are not set.
+       configured) or if mongo_conn_id is not set.
 
-    DynamoDB document structure
-    ---------------------------
+    MongoDB document structure (collection: checkpoints)
+    ----------------------------------------------------
     {
-        "dag_id":          "<dag_id>",          # partition key
+        "dag_id":          "<dag_id>",          # lookup key
         "checkpoint_from": "<checkpoint_to>",   # becomes next run's checkpoint_from
         "updated_at":      "<ISO timestamp>"
     }
@@ -124,13 +158,9 @@ class MetricPushOperator(BaseOperator):
         Pipeline status written into the metric payload. Defaults to 'success'.
     extra_payload : dict, optional
         Additional fields merged into the published metric payload.
-    dynamodb_table : str, optional
-        DynamoDB table name for checkpoint storage.
-        When None, checkpoint save is skipped.
-    dynamodb_conn_id : str, optional
-        Airflow connection id that supplies AWS region and credentials
-        for DynamoDB. Uses keys: aws_access_key_id, aws_secret_access_key,
-        region_name (from conn.extra_dejson or conn.host as region fallback).
+    mongo_conn_id : str, optional
+        Airflow connection id for the MongoDB checkpoint store.
+        Matches the mongo_conn_id used by InitOperator to read checkpoints.
         When None, checkpoint save is skipped.
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.
@@ -147,25 +177,24 @@ class MetricPushOperator(BaseOperator):
         metric_config_raw: dict,
         status: str = "success",
         extra_payload: Optional[dict] = None,
-        dynamodb_table: Optional[str] = None,
-        dynamodb_conn_id: Optional[str] = None,
+        mongo_conn_id: Optional[str] = None,
         xcom_key: str = "run_context",
         openbao_conn_id: str = OpenBaoHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.init_task_id     = init_task_id
-        self.metric_type      = metric_type
+        self.init_task_id      = init_task_id
+        self.metric_type       = metric_type
         self.metric_config_raw = metric_config_raw
-        self.status           = status
-        self.extra_payload    = extra_payload or {}
-        self.dynamodb_table   = dynamodb_table
-        self.dynamodb_conn_id = dynamodb_conn_id
-        self.xcom_key         = xcom_key
-        self.openbao_conn_id  = openbao_conn_id
+        self.status            = status
+        self.extra_payload     = extra_payload or {}
+        self.mongo_conn_id     = mongo_conn_id
+        self.xcom_key          = xcom_key
+        self.openbao_conn_id   = openbao_conn_id
 
     def execute(self, context: Context) -> None:
         dag_id: str = context["dag"].dag_id
+        stop_time: str = datetime.now(tz=timezone.utc).isoformat()
 
         # ── 1. Pull RunContext from XCom ──────────────────────────────────
         raw_context: dict = context["ti"].xcom_pull(
@@ -173,23 +202,42 @@ class MetricPushOperator(BaseOperator):
             key=self.xcom_key,
         )
 
-        checkpoint_to: Optional[str] = None  # serialised as string for DynamoDB / metric payload
-        payload = {
-            "status":         self.status,
-            "dag_id":         dag_id,
-            "run_id":         context["run_id"],
-            "ingestion_date": context["data_interval_start"].date().isoformat(),
-        }
+        checkpoint_from: Optional[str] = None
+        checkpoint_to: Optional[str] = None
+
+        read_type: Optional[str] = None
+        ingestion_date: Optional[str] = None
+        redis_metric_config_raw: Optional[dict] = None
+        redis_metric_credentials: Optional[dict] = None
 
         if raw_context:
-            raw_ckpt = raw_context.get("checkpoint_to")
-            # checkpoint_to is stored as {"t": "int"|"ts", "v": ...} — extract the value
-            if isinstance(raw_ckpt, dict):
-                checkpoint_to = str(raw_ckpt.get("v", "")) or None
-            checkpoint_to = checkpoint_to or None
-            payload["checkpoint_to"] = checkpoint_to
-            payload["read_type"]     = raw_context.get("read_type")
-            payload["write_type"]    = raw_context.get("write_type")
+            raw_ckpt_from = raw_context.get("checkpoint_from")
+            if isinstance(raw_ckpt_from, dict):
+                checkpoint_from = str(raw_ckpt_from.get("v", "")) or None
+
+            raw_ckpt_to = raw_context.get("checkpoint_to")
+            if isinstance(raw_ckpt_to, dict):
+                checkpoint_to = str(raw_ckpt_to.get("v", "")) or None
+
+            read_type = raw_context.get("read_type")
+            ingestion_date = raw_context.get("ingestion_date")
+            redis_metric_config_raw = raw_context.get("redis_metric_config_raw")
+            redis_metric_credentials = raw_context.get("redis_metric_credentials")
+
+        payload = {
+            "dag_id":          dag_id,
+            "run_id":          context["run_id"],
+            "status":          self.status,
+            "start_time":      context["dag_run"].start_date.isoformat(),
+            "stop_time":       stop_time,
+            "checkpoint_from": checkpoint_from,
+            "checkpoint_to":   checkpoint_to,
+        }
+
+        if read_type is not None:
+            payload["read_type"] = read_type
+        if ingestion_date is not None:
+            payload["ingestion_date"] = ingestion_date
 
         payload.update(self.extra_payload)
 
@@ -204,50 +252,48 @@ class MetricPushOperator(BaseOperator):
         adapter.publish(payload)
         log.info("[MetricPushOperator] Metric published successfully")
 
-        # ── 3. Upsert checkpoint_to to DynamoDB ───────────────────────────
-        if checkpoint_to and self.dynamodb_table and self.dynamodb_conn_id:
-            self._save_checkpoint_dynamo(dag_id, checkpoint_to)
+        # ── 2b. Secondary Redis push (optional) ───────────────────────────
+        if redis_metric_config_raw and redis_metric_credentials:
+            _push_redis_metric(payload, redis_metric_config_raw, redis_metric_credentials)
+
+        # ── 3. Upsert checkpoint_to to MongoDB ────────────────────────────
+        if checkpoint_to and self.mongo_conn_id:
+            self._save_checkpoint_mongo(dag_id, checkpoint_to)
             log.info(
-                "[MetricPushOperator] Checkpoint saved to DynamoDB — "
-                "dag_id=%s checkpoint_to=%s table=%s",
-                dag_id, checkpoint_to, self.dynamodb_table,
+                "[MetricPushOperator] Checkpoint saved to MongoDB — "
+                "dag_id=%s checkpoint_to=%s",
+                dag_id, checkpoint_to,
             )
         else:
             log.info(
                 "[MetricPushOperator] Checkpoint save skipped — "
-                "checkpoint_to=%s dynamodb_table=%s dynamodb_conn_id=%s",
-                checkpoint_to, self.dynamodb_table, self.dynamodb_conn_id,
+                "checkpoint_to=%s mongo_conn_id=%s",
+                checkpoint_to, self.mongo_conn_id,
             )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
-    def _save_checkpoint_dynamo(self, dag_id: str, checkpoint_to: str) -> None:
+    def _save_checkpoint_mongo(self, dag_id: str, checkpoint_to: str) -> None:
         """
-        Upsert the checkpoint document into DynamoDB.
-        The previous checkpoint_to becomes the next run's checkpoint_from.
-
-        DynamoDB item:
-            dag_id         (S) — partition key
-            checkpoint_from (S) — value to use as checkpoint_from next run
-            updated_at     (S) — ISO timestamp of this write
+        Upsert the checkpoint document into MongoDB.
         """
-        from datetime import datetime, timezone
-
-        conn = BaseHook.get_connection(self.dynamodb_conn_id)
-        extra = conn.extra_dejson if conn.extra_dejson else {}
-
-        client = boto3.client(
-            "dynamodb",
-            region_name=extra.get("region_name") or conn.host or "us-east-1",
-            aws_access_key_id=extra.get("aws_access_key_id") or conn.login,
-            aws_secret_access_key=extra.get("aws_secret_access_key") or conn.password,
+        conn = BaseHook.get_connection(self.mongo_conn_id)
+        client = MongoClient(
+            host=conn.host,
+            port=conn.port,
+            username=conn.login,
+            password=conn.password,
         )
-
-        client.put_item(
-            TableName=self.dynamodb_table,
-            Item={
-                "dag_id":          {"S": dag_id},
-                "checkpoint_from": {"S": checkpoint_to},
-                "updated_at":      {"S": datetime.now(tz=timezone.utc).isoformat()},
-            },
-        )
+        try:
+            db = client[conn.schema or "config"]
+            db["checkpoints"].replace_one(
+                {"dag_id": dag_id},
+                {
+                    "dag_id":        dag_id,
+                    "checkpoint_to": checkpoint_to,
+                    "updated_at":    datetime.now(tz=timezone.utc).isoformat(),
+                },
+                upsert=True,
+            )
+        finally:
+            client.close()

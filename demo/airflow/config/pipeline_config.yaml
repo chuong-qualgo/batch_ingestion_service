@@ -22,7 +22,3 @@ metric:
   stream_name: pipeline-metrics
   max_len: 1000
 
-redis_metric:
-  credential_ref: data-platform/redis-events
-  stream_name: pipeline-events
-  max_len: 5000

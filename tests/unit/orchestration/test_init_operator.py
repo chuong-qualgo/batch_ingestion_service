@@ -133,7 +133,6 @@ def test_execute_fetches_metric_credentials(operator, airflow_context):
 
         operator.execute(airflow_context)
 
-        # All three credential refs must be fetched
         calls = [c[0][0] for c in mock_hook.get_secret.call_args_list]
         assert "data-processor/postgres" in calls
         assert "data-platform/hadoop" in calls
@@ -522,3 +521,172 @@ def test_run_context_from_dict_defaults_empty_metric(table_source_config, sink_c
     restored = RunContext.from_dict(d)
     assert restored.metric_credentials == {}
     assert restored.metric_config_raw == {}
+
+
+# ── _fetch_checkpoint_from (MongoDB) ─────────────────────────────────────
+
+class TestFetchCheckpointFromMongo:
+    def _make_mock_conn(self, schema="config"):
+        conn = MagicMock()
+        conn.host = "mongo-host"
+        conn.port = 27017
+        conn.login = "mongo_user"
+        conn.password = "mongo_pass"
+        conn.schema = schema
+        return conn
+
+    def test_returns_int_checkpoint_from_doc(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+        mock_collection.find_one.return_value = {"dag_id": "test_dag", "checkpoint_to": 999}
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            result = operator._fetch_checkpoint_from("test_dag")
+
+        assert result == 999
+
+    def test_returns_datetime_checkpoint_from_doc(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+        dt = datetime(2024, 3, 31, 23, 59, 59)
+        mock_collection.find_one.return_value = {"dag_id": "test_dag", "checkpoint_to": dt}
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            result = operator._fetch_checkpoint_from("test_dag")
+
+        assert result == dt
+
+    def test_returns_none_when_no_document(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+        mock_collection.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            result = operator._fetch_checkpoint_from("test_dag")
+
+        assert result is None
+
+    def test_queries_by_dag_id(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+        mock_collection.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            operator._fetch_checkpoint_from("my_dag")
+
+        mock_collection.find_one.assert_called_once_with({"dag_id": "my_dag"})
+
+    def test_uses_conn_schema_as_database(self, operator):
+        mock_conn = self._make_mock_conn(schema="pipeline_config")
+        mock_mongo = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            operator._fetch_checkpoint_from("dag")
+
+        mock_mongo.__getitem__.assert_called_once_with("pipeline_config")
+
+    def test_defaults_to_config_database_when_schema_empty(self, operator):
+        mock_conn = self._make_mock_conn(schema=None)
+        mock_mongo = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            operator._fetch_checkpoint_from("dag")
+
+        mock_mongo.__getitem__.assert_called_once_with("config")
+
+    def test_client_closed_after_query(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            operator._fetch_checkpoint_from("dag")
+
+        mock_mongo.close.assert_called_once()
+
+    def test_client_closed_even_on_error(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.side_effect = RuntimeError("db error")
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ), patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ):
+            with pytest.raises(RuntimeError):
+                operator._fetch_checkpoint_from("dag")
+
+        mock_mongo.close.assert_called_once()
+
+    def test_connects_with_airflow_connection_params(self, operator):
+        mock_conn = self._make_mock_conn()
+        mock_mongo = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
+
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=mock_conn,
+        ) as mock_get_conn, patch(
+            "orchestration.operators.init_operator.MongoClient",
+            return_value=mock_mongo,
+        ) as mock_client_cls:
+            operator._fetch_checkpoint_from("dag")
+
+        mock_get_conn.assert_called_once_with("mongo_checkpoint")
+        mock_client_cls.assert_called_once_with(
+            host="mongo-host",
+            port=27017,
+            username="mongo_user",
+            password="mongo_pass",
+        )

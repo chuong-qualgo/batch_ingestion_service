@@ -72,7 +72,7 @@ class SQLAdapter(BaseReadAdapter):
         if cfg.checkpoint_column and self.checkpoint_from is not None and self.checkpoint_to is not None:
             from_val = self._format_checkpoint(self.checkpoint_from)
             to_val   = self._format_checkpoint(self.checkpoint_to)
-            base += f" WHERE {cfg.checkpoint_column} > {from_val} AND {cfg.checkpoint_column} <= {to_val}"
+            base += f" WHERE {from_val} < {to_val} AND {cfg.checkpoint_column} > {from_val} AND {cfg.checkpoint_column} <= {to_val}"
 
         return f"({base}) AS subq"
 

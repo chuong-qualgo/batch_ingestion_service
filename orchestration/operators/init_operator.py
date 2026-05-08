@@ -267,7 +267,7 @@ class InitOperator(BaseOperator):
             doc = db["checkpoints"].find_one({"dag_id": dag_id})
             if not doc:
                 return None
-            return _parse_checkpoint(doc["checkpoint_from"])
+            return _parse_checkpoint(doc["checkpoint_to"])
         finally:
             client.close()
 

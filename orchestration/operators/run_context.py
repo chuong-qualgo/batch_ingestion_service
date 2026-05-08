@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional, Union
 
@@ -73,7 +73,7 @@ class RunContext:
     checkpoint_to : str, optional
         MAX(checkpoint_column) fetched from the source by InitOperator.
         Passed to SparkRunOperator as the upper bound of the read query.
-        Written to DynamoDB by MetricPushOperator after a successful run.
+        Written to MongoDB by MetricPushOperator after a successful run.
     """
 
     dag_id: str
