@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from airflow.hooks.base import BaseHook
 from airflow.models import BaseOperator
 from airflow.utils.context import Context
-from pymongo import MongoClient
 
 from adapters.factory.adapter_config import AdapterConfig, MetricAdapterType
 from orchestration.operators.metric_operator import push_metric_inline
@@ -20,24 +20,25 @@ class SparkRunOperator(BaseOperator):
     Airflow operator that submits and runs the Spark ingestion job.
 
     Reads RunContext from XCom (written by InitOperator), instantiates
-    the correct source and sink adapters, runs the full read → write
-    pipeline, and saves checkpoint_to back to MongoDB on success.
+    the correct source and sink adapters, and runs the full read → write
+    pipeline. checkpoint_from and checkpoint_to are both resolved by
+    InitOperator — Spark only uses them to bound the read query.
+    Checkpoint persistence is handled by MetricPushOperator.
 
     On failure, pushes an inline failure metric via push_metric_inline()
     if metric_type and metric_config_raw are provided.
 
     Execution steps
     ---------------
-    1.  Pull RunContext from XCom and deserialise it.
-    2.  Build SparkSession.
-    3.  Instantiate source adapter via ReadAdapterFactory.
-    4.  Instantiate sink adapter via WriteAdapterFactory.
-    5.  Validate source connection.
-    6.  Validate sink connection.
-    7.  Apply source filters.
-    8.  Read data from source → DataFrame.
-    9.  Write DataFrame to sink.
-    10. Persist checkpoint_to to MongoDB.
+    1. Pull RunContext from XCom and deserialise it.
+    2. Build SparkSession.
+    3. Instantiate source adapter via ReadAdapterFactory.
+    4. Instantiate sink adapter via WriteAdapterFactory.
+    5. Validate source connection.
+    6. Validate sink connection.
+    7. Apply source filters.
+    8. Read data from source → DataFrame (bounded by checkpoint_from / checkpoint_to).
+    9. Write DataFrame to sink.
 
     On any exception: push inline failure metric (if configured), then re-raise.
 
@@ -48,7 +49,8 @@ class SparkRunOperator(BaseOperator):
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.
     mongo_conn_id : str
-        Airflow connection id for MongoDB checkpoint store.
+        Airflow connection id for MongoDB checkpoint store (kept for
+        future use but checkpoint writes now handled by MetricPushOperator).
     spark_app_name : str, optional
         SparkSession app name. Defaults to dag_id at runtime.
     spark_config : dict, optional
@@ -135,6 +137,7 @@ class SparkRunOperator(BaseOperator):
             )
             source_adapter.credentials = run_ctx.source_credentials
             source_adapter.checkpoint_from = run_ctx.checkpoint_from
+            source_adapter.checkpoint_to   = run_ctx.checkpoint_to
             log.info("[SparkRunOperator] Source adapter — %s", type(source_adapter).__name__)
 
             # ── 4. Instantiate sink adapter ───────────────────────────────
@@ -160,7 +163,11 @@ class SparkRunOperator(BaseOperator):
             # ── 8. Read from source ───────────────────────────────────────
             log.info("[SparkRunOperator] Reading from source...")
             df = source_adapter.read()
-            log.info("[SparkRunOperator] Read complete — checkpoint_to=%s", source_adapter.checkpoint_to)
+            log.info(
+                "[SparkRunOperator] Read complete — checkpoint_from=%s checkpoint_to=%s",
+                run_ctx.checkpoint_from,
+                run_ctx.checkpoint_to,
+            )
 
             # ── 9. Write to sink ──────────────────────────────────────────
             write_path = sink_adapter.build_write_path()
@@ -168,13 +175,8 @@ class SparkRunOperator(BaseOperator):
             sink_adapter.write(df)
             log.info("[SparkRunOperator] Write complete")
 
-            # ── 10. Save checkpoint_to to MongoDB ─────────────────────────
-            if source_adapter.checkpoint_to:
-                self._save_checkpoint(dag_id, source_adapter.checkpoint_to)
-                log.info(
-                    "[SparkRunOperator] Checkpoint saved — %s",
-                    source_adapter.checkpoint_to,
-                )
+            # checkpoint_to persistence is handled by MetricPushOperator
+            log.info("[SparkRunOperator] Pipeline complete — checkpoint will be saved by MetricPushOperator")
 
         except Exception as exc:
             log.error("[SparkRunOperator] Pipeline failed: %s", exc)
@@ -182,13 +184,13 @@ class SparkRunOperator(BaseOperator):
             self._push_failure_metric(dag_id=dag_id, run_id=run_id, exc=exc)
             raise
 
-        finally:
-            if spark:
-                try:
-                    spark.stop()
-                    log.info("[SparkRunOperator] SparkSession stopped")
-                except Exception:
-                    pass
+        # finally:
+        #     if spark:
+        #         try:
+        #             spark.stop()
+        #             log.info("[SparkRunOperator] SparkSession stopped")
+        #         except Exception:
+        #             pass
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -205,28 +207,6 @@ class SparkRunOperator(BaseOperator):
             builder = builder.config(key, value)
         return builder.getOrCreate()
 
-    def _save_checkpoint(self, dag_id: str, checkpoint_to: str) -> None:
-        """Upsert checkpoint_to into MongoDB. Previous value becomes next checkpoint_from."""
-        mongo_conn = self.get_connection(self.mongo_conn_id)
-        client = MongoClient(
-            host=mongo_conn.host,
-            port=mongo_conn.port,
-            username=mongo_conn.login,
-            password=mongo_conn.password,
-        )
-        try:
-            from datetime import datetime, timezone
-            db = client[mongo_conn.schema or "config"]
-            db["checkpoints"].update_one(
-                {"dag_id": dag_id},
-                {"$set": {
-                    "checkpoint_from": checkpoint_to,
-                    "updated_at": datetime.now(tz=timezone.utc),
-                }},
-                upsert=True,
-            )
-        finally:
-            client.close()
 
     def _push_failure_metric(self, dag_id: str, run_id: str, exc: Exception) -> None:
         """Push inline failure metric if metric config is present. Non-fatal."""

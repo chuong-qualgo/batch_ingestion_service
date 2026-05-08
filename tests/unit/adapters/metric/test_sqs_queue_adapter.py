@@ -23,14 +23,16 @@ def sqs_queue_url():
 
 @pytest.fixture
 def adapter(sqs_queue_url, sqs_credentials):
+    # queue_url injected from OpenBao credentials into config
+    creds_with_url = {**sqs_credentials, "queue_url": sqs_queue_url, "aws_region": AWS_REGION}
     config = SQSMetricConfig(
         credential_ref="ref",
-        queue_url=sqs_queue_url,
-        aws_region=AWS_REGION,
+        queue_url=creds_with_url["queue_url"],
+        aws_region=creds_with_url["aws_region"],
     )
     return SQSQueueAdapter(
         config=config,
-        credentials=sqs_credentials,
+        credentials=creds_with_url,
         message_attributes={"service": "file-landing"},
     )
 

@@ -1,5 +1,6 @@
 """Tests for NoSQLAdapter and its concrete implementations."""
 import pytest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from adapters.source.base_read_adapter import TableSourceConfig
@@ -12,21 +13,20 @@ from adapters.source.nosql.source_cassandra_adapter import SourceCassandraAdapte
 
 @pytest.fixture
 def mongo_config():
-    return TableSourceConfig(
+    cfg = TableSourceConfig(
         credential_ref="data-processor/mongo",
-        host="mongo-host",
-        port=27017,
         database="orders",
         table="transactions",
     )
+    cfg.host = "mongo-host"   # injected from OpenBao
+    cfg.port = 27017
+    return cfg
 
 
 @pytest.fixture
 def dynamo_config():
     return TableSourceConfig(
         credential_ref="data-processor/dynamodb",
-        host="",
-        port=0,
         database="",
         table="Orders",
     )
@@ -34,13 +34,14 @@ def dynamo_config():
 
 @pytest.fixture
 def cassandra_config():
-    return TableSourceConfig(
+    cfg = TableSourceConfig(
         credential_ref="data-processor/cassandra",
-        host="cassandra-host",
-        port=9042,
         database="metrics_ks",
         table="events",
     )
+    cfg.host = "cassandra-host"   # injected from OpenBao
+    cfg.port = 9042
+    return cfg
 
 
 @pytest.fixture
@@ -88,7 +89,7 @@ def test_mongodb_connection_options_contains_uri(mongo_adapter):
 
 def test_mongodb_checkpoint_adds_pipeline(mongo_adapter):
     mongo_adapter.source_config.checkpoint_column = "created_at"
-    mongo_adapter.checkpoint_from = "2024-01-01"
+    mongo_adapter.checkpoint_from = datetime(2024, 1, 1)
     opts = mongo_adapter._build_connection_options()
     assert "$match" in opts["spark.mongodb.read.aggregation.pipeline"]
     assert "created_at" in opts["spark.mongodb.read.aggregation.pipeline"]

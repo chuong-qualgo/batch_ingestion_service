@@ -14,6 +14,9 @@ def fake_redis_client():
 
 @pytest.fixture
 def adapter(redis_metric_config, redis_credentials, fake_redis_client, monkeypatch):
+    # host/port injected from OpenBao credentials into config
+    redis_metric_config.host = redis_credentials.get("host", "localhost")
+    redis_metric_config.port = int(redis_credentials.get("port", 6379))
     inst = RedisQueueAdapter(
         config=redis_metric_config,
         credentials=redis_credentials,

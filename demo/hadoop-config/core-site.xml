@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://namenode:9000</value>
+    <description>Default filesystem — points to the HDFS NameNode.</description>
+  </property>
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>/opt/hadoop/data</value>
+  </property>
+  <!-- Allow any user to write to HDFS in this demo (no Kerberos) -->
+  <property>
+    <name>hadoop.http.staticuser.user</name>
+    <value>hadoop</value>
+  </property>
+</configuration>

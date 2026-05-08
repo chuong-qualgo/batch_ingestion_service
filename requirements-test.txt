@@ -1,31 +1,40 @@
-# Core
-pytest==8.2.0
-pytest-mock==3.14.0
+# =============================================================================
+# Test dependencies — Python 3.11 compatible
+# Install: pip install -r requirements-test.txt
+# Run:     pytest
+# =============================================================================
 
-# Mocking AWS
-boto3==1.34.0
-moto[sqs]==5.0.7
+# ── Test runner ───────────────────────────────────────────────────────────────
+pytest==8.3.5
+pytest-mock==3.14.1
 
-# Redis mock
-fakeredis==2.23.0
-redis==5.0.4
+# ── PySpark ───────────────────────────────────────────────────────────────────
+# 3.5.x is the last series with full Python 3.11 support.
+# PySpark 4.x requires Python 3.12+.
+pyspark==3.5.5
 
-# PySpark (lightweight for unit tests)
-pyspark==3.5.1
+# ── Apache Airflow ────────────────────────────────────────────────────────────
+# 2.9.x is the last series tested against Python 3.11.
+# Airflow 3.x dropped Python 3.11 support.
+apache-airflow==2.9.3
 
-# Airflow (minimal)
-apache-airflow==2.9.1
-apache-airflow-providers-common-sql==1.14.0
+# ── OpenBao / Vault client ────────────────────────────────────────────────────
+hvac==2.4.0
 
-# OpenBao / Vault client
-hvac==2.1.0
+# ── AWS mocking ───────────────────────────────────────────────────────────────
+boto3==1.35.99          # last 1.35.x — stable on Python 3.11
+moto[sqs,s3]==5.0.28    # last 5.0.x — fully verified on Python 3.11
 
-# MongoDB
-pymongo==4.7.0
-mongomock==4.1.2
+# ── Redis mocking ─────────────────────────────────────────────────────────────
+redis==5.2.1            # 5.x series supports Python 3.11
+fakeredis==2.26.2       # 2.x — last version before requiring Python 3.12
 
-# YAML
-PyYAML==6.0.1
+# ── MongoDB ───────────────────────────────────────────────────────────────────
+pymongo==4.9.2          # 4.9.x — supports Python 3.11
+mongomock==4.1.2        # 4.1.x — last version compatible with pymongo 4.x
 
-# Cassandra driver (mocked in tests)
-cassandra-driver==3.29.0
+# ── Cassandra driver (mocked in tests — import only) ─────────────────────────
+cassandra-driver==3.29.2
+
+# ── YAML ─────────────────────────────────────────────────────────────────────
+PyYAML==6.0.2

@@ -1,0 +1,418 @@
+# =============================================================================
+# File Landing Service — Demo
+# Pipeline: PostgreSQL → Apache Spark → Hadoop HDFS
+#
+# Services:
+#   postgres    — source database (seeded with sample orders table)
+#   namenode    — Hadoop HDFS NameNode
+#   datanode    — Hadoop HDFS DataNode
+#   spark       — Spark master + worker (standalone mode)
+#   airflow     — Airflow scheduler + webserver + worker (CeleryExecutor)
+#   mongo       — MongoDB checkpoint store
+#   openbao     — Secret manager (OpenBao)
+#   redis       — Celery broker (Redis)
+#   mongo-express — MongoDB data viewer
+#   pgadmin     — PostgreSQL data viewer
+#   redis-commander — Redis data viewer
+#
+# Usage:
+#   docker compose up -d
+#   open http://localhost:8080   → Airflow UI  (admin / admin)
+#   open http://localhost:8081   → Mongo Express (admin / admin_pass)
+#   open http://localhost:5050   → pgAdmin (admin@example.com / admin_pass)
+#   open http://localhost:8082   → Redis Commander
+#   open http://localhost:9870   → Hadoop NameNode UI
+#   open http://localhost:9864   → Hadoop DataNode UI
+#   open http://localhost:8090   → Spark UI
+# =============================================================================
+
+networks:
+  landing-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  hdfs-namenode:
+  hdfs-datanode:
+  mongo-data:
+  openbao-data:
+  airflow-logs:
+  airflow-plugins:
+  pgadmin-data:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PostgreSQL — source database
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fls-postgres
+    environment:
+      POSTGRES_USER: orders_user
+      POSTGRES_PASSWORD: orders_pass
+      POSTGRES_DB: orders_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./demo/postgres-init/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./demo/postgres-init/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders_user -d orders_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - landing-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hadoop HDFS — NameNode
+# ─────────────────────────────────────────────────────────────────────────────
+  namenode:
+    build:
+      context: demo/hadoop
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: fls-namenode
+    hostname: namenode
+    entrypoint: ["/opt/hadoop/entrypoint.sh", "namenode"]
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      CLUSTER_NAME: demo-cluster
+    env_file: demo/hadoop-config/hadoop.env
+    ports:
+      - "9870:9870"   # NameNode web UI
+      - "9000:9000"   # HDFS RPC
+    volumes:
+      - hdfs-namenode:/opt/hadoop/data/namenode
+      - ./demo/hadoop-config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./demo/hadoop-config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    networks:
+      landing-net:
+        aliases:
+          - namenode
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hadoop HDFS — DataNode
+# ─────────────────────────────────────────────────────────────────────────────
+  datanode:
+    build:
+      context: demo/hadoop
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: fls-datanode
+    hostname: datanode
+    entrypoint: ["/opt/hadoop/entrypoint.sh", "datanode"]
+    environment:
+      HADOOP_HOME: /opt/hadoop
+    env_file: demo/hadoop-config/hadoop.env
+    ports:
+      - "9864:9864"   # DataNode web UI
+    volumes:
+      - hdfs-datanode:/opt/hadoop/data/datanode
+      - ./demo/hadoop-config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./demo/hadoop-config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - landing-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apache Spark — master
+# ─────────────────────────────────────────────────────────────────────────────
+  spark-master:
+    build:
+      context: demo/spark
+      dockerfile: Dockerfile
+    container_name: fls-spark-master
+    hostname: spark-master
+    command: ["/bin/bash", "-c", "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*.out"]
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8090"
+      HADOOP_USER_NAME: hadoop
+    ports:
+      - "8090:8090"   # Spark master web UI
+      - "7077:7077"   # Spark master RPC
+    volumes:
+      - ./demo/hadoop-config/core-site.xml:/opt/hadoop/conf/core-site.xml
+      - ./demo/hadoop-config/hdfs-site.xml:/opt/hadoop/conf/hdfs-site.xml
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - landing-net
+    mem_limit: 2g
+    memswap_limit: 2g
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apache Spark — worker
+# ─────────────────────────────────────────────────────────────────────────────
+  spark-worker:
+    build:
+      context: demo/spark
+      dockerfile: Dockerfile
+    container_name: fls-spark-worker
+    hostname: spark-worker
+    command: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*.out"]
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      HADOOP_USER_NAME: hadoop
+    depends_on:
+      - spark-master
+    volumes:
+      - ./demo/hadoop-config/core-site.xml:/opt/hadoop/conf/core-site.xml
+      - ./demo/hadoop-config/hdfs-site.xml:/opt/hadoop/conf/hdfs-site.xml
+    networks:
+      - landing-net
+    mem_limit: 3g
+    memswap_limit: 3g
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MongoDB — checkpoint store
+# ─────────────────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7.0
+    container_name: fls-mongo
+    hostname: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_pass
+      MONGO_INITDB_DATABASE: config
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./demo/mongo-init/01_init.js:/docker-entrypoint-initdb.d/01_init.js
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - landing-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenBao — secret manager
+# ─────────────────────────────────────────────────────────────────────────────
+  openbao:
+    image: quay.io/openbao/openbao:2.3.1
+    container_name: fls-openbao
+    hostname: openbao
+    entrypoint: ["/bin/sh", "/etc/openbao/entrypoint.sh"]
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      BAO_API_ADDR: http://openbao:8200
+      BAO_DATA_DIR: /openbao/data
+    ports:
+      - "8200:8200"
+    volumes:
+      - openbao-data:/openbao/data
+      - ./demo/openbao/config.hcl:/etc/openbao/config.hcl
+      - ./demo/openbao/entrypoint.sh:/etc/openbao/entrypoint.sh
+    healthcheck:
+      test: ["CMD-SHELL", "bao status -address=http://127.0.0.1:8200 | grep -q Seal"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - landing-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis — metric queue (Redis Streams)
+# ─────────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: fls-redis
+    hostname: redis
+    command: ["redis-server", "--requirepass", "redis_pass", "--loglevel", "notice"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_pass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - landing-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apache Airflow — scheduler + webserver (CeleryExecutor)
+# Init runs automatically in scheduler entrypoint on first start
+# ─────────────────────────────────────────────────────────────────────────────
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: demo/airflow/Dockerfile
+    container_name: fls-airflow-scheduler
+    command: scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
+      AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      PYTHONPATH: /opt/airflow/app
+      HADOOP_USER_NAME: hadoop
+    volumes:
+      - ./demo/airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - airflow-plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    networks:
+      - landing-net
+
+  airflow-worker:
+    build:
+      context: .
+      dockerfile: demo/airflow/Dockerfile
+    container_name: fls-airflow-worker
+    command: celery worker
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
+      AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
+      PYTHONPATH: /opt/airflow/app
+      HADOOP_USER_NAME: hadoop
+    volumes:
+      - ./demo/airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - airflow-plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - landing-net
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: demo/airflow/Dockerfile
+    container_name: fls-airflow-webserver
+    command: webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
+      AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    ports:
+      - "8080:8080"   # Airflow web UI
+    volumes:
+      - ./demo/airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - airflow-plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-worker:
+        condition: service_started
+    networks:
+      - landing-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mongo Express — MongoDB data viewer
+# ─────────────────────────────────────────────────────────────────────────────
+  mongo-express:
+    image: mongo-express:latest
+    container_name: fls-mongo-express
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: mongo_user
+      ME_CONFIG_MONGODB_ADMINPASSWORD: mongo_pass
+      ME_CONFIG_MONGODB_URL: mongodb://mongo_user:mongo_pass@mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin_pass
+    ports:
+      - "8081:8081"   # Mongo Express web UI
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - landing-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pgAdmin — PostgreSQL data viewer
+# ─────────────────────────────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: fls-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin_pass
+    ports:
+      - "5050:80"   # pgAdmin web UI
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - landing-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/misc/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis Commander — Redis data viewer
+# ─────────────────────────────────────────────────────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: fls-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:redis_pass
+    ports:
+      - "8082:8081"   # Redis Commander web UI
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - landing-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

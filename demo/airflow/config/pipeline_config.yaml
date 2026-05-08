@@ -1,0 +1,23 @@
+# =============================================================================
+# Demo pipeline config — PostgreSQL orders → HDFS landing zone
+# =============================================================================
+
+read_type:   sql
+write_type:  hadoop
+metric_type: onprem_queue
+
+source:
+  credential_ref: data-processor/postgres
+  database: orders_db
+  schema: public
+  table: orders
+  checkpoint_column: updated_at        # enables incremental reads on reruns
+
+sink:
+  credential_ref: data-platform/hadoop
+  source_system_name: postgres-demo    # appears in the HDFS output path
+
+metric:
+  credential_ref: data-platform/redis
+  stream_name: pipeline-metrics
+  max_len: 1000

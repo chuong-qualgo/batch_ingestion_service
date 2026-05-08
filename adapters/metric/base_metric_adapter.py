@@ -21,11 +21,12 @@ class RedisMetricConfig(MetricConfig):
     Attributes
     ----------
     host : str
-        Redis server hostname or IP.
+        Redis server hostname — populated from OpenBao secret at runtime.
     port : int
-        Redis server port. Default: 6379.
+        Redis server port — populated from OpenBao secret at runtime.
     stream_name : str
         Redis stream key to publish messages to (XADD target).
+        Non-sensitive — kept in YAML config.
     max_len : int, optional
         Max stream length — older entries are trimmed automatically.
         None means unbounded.
@@ -44,10 +45,10 @@ class SQSMetricConfig(MetricConfig):
     Attributes
     ----------
     queue_url : str
-        Full SQS queue URL.
+        Full SQS queue URL — populated from OpenBao secret at runtime.
         Example: https://sqs.ap-southeast-1.amazonaws.com/123456789/my-queue
     aws_region : str
-        AWS region the queue lives in.
+        AWS region — populated from OpenBao secret at runtime.
     """
     queue_url: str = ""
     aws_region: str = ""

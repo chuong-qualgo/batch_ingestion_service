@@ -1,3 +1,4 @@
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -41,10 +42,12 @@ class SinkConfig:
     Attributes
     ----------
     endpoint : str
-        Root URI of the sink system.
+        Root URI of the sink system — populated from OpenBao secret at runtime.
         Examples: hdfs://namenode:9000, s3://my-bucket, gs://my-bucket
+        Stored in OpenBao alongside hdfs_user / aws_access_key_id.
     credential_ref : str
         Key used to fetch sink credentials from OpenBao.
+        The secret must include 'endpoint' in addition to auth fields.
     source_system_name : str
         Free-form label identifying the origin system (defined by the user).
         Examples: "postgres-prod", "mongodb-orders", "sftp-partner"
@@ -132,7 +135,7 @@ class BaseWriteAdapter(ABC):
         cfg = self.sink_config
 
         if isinstance(cfg.source_config, TableSourceConfig):
-            schema_name = cfg.source_config.database or DEFAULT_SCHEMA_NAME
+            schema_name = cfg.source_config.schema or DEFAULT_SCHEMA_NAME
             base = PurePosixPath(
                 cfg.source_system_name,
                 cfg.source_config.database,
@@ -148,10 +151,11 @@ class BaseWriteAdapter(ABC):
                 f"Unsupported source_config type: {type(cfg.source_config)}"
             )
 
+        safe_run_id = re.sub(r"[^a-zA-Z0-9]", "_", cfg.run_id)
         partitions = PurePosixPath(
             f"ingestion_date={cfg.ingestion_date.isoformat()}",
             f"ingestion_time={cfg.ingestion_time.strftime('%H-%M-%S')}",
-            f"run_id={cfg.run_id}",
+            f"run_id={safe_run_id}",
         )
 
         # PurePosixPath strips double slashes (s3a:// → s3a:/) so we

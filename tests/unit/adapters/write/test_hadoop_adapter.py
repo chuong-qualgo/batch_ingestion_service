@@ -25,19 +25,34 @@ def test_build_write_path_table_source(hadoop_sink):
     path = hadoop_sink.build_write_path()
     assert "postgres-prod" in path
     assert "orders_db" in path
+    assert "public" in path          # schema field, not database repeated
     assert "orders" in path
     assert "ingestion_date=2024-01-15" in path
     assert "ingestion_time=14-30-00" in path
-    assert "run_id=scheduled__2024-01-15" in path
+    assert "run_id=scheduled__2024_01_15" in path  # hyphens sanitised to _
+
+
+def test_build_write_path_sanitizes_run_id(mock_spark, sink_config):
+    sink_config.run_id = "manual__2026-05-08T06:30:25.377391+00:00"
+    adapter = SinkHadoopAdapter(
+        spark=mock_spark,
+        sink_config=sink_config,
+        credentials={"hdfs_user": "hadoop"},
+    )
+    path = adapter.build_write_path()
+    run_id_segment = [p for p in path.split("/") if p.startswith("run_id=")][0]
+    assert run_id_segment == "run_id=manual__2026_05_08T06_30_25_377391_00_00"
+    assert ":" not in run_id_segment
+    assert "+" not in run_id_segment
 
 
 def test_build_write_path_path_source(mock_spark):
     path_cfg = PathSourceConfig(
         credential_ref="ref",
-        path="s3a://raw-bucket/exports/",
     )
+    path_cfg.path = "s3a://raw-bucket/exports/"   # simulate inject_connection
     sink_cfg = SinkConfig(
-        endpoint="hdfs://namenode:9000",
+        endpoint="",
         credential_ref="ref",
         source_system_name="sftp-partner",
         ingestion_date=date(2024, 3, 10),
@@ -45,6 +60,7 @@ def test_build_write_path_path_source(mock_spark):
         run_id="manual__2024-03-10",
         source_config=path_cfg,
     )
+    sink_cfg.endpoint = "hdfs://namenode:9000"   # simulate inject_connection
     adapter = SinkHadoopAdapter(
         spark=mock_spark,
         sink_config=sink_cfg,
@@ -151,7 +167,9 @@ def test_validate_connection_path_exists(hadoop_sink):
     mock_fs.exists.return_value = True
     mock_path = MagicMock()
     mock_path.getFileSystem.return_value = mock_fs
-    hadoop_sink.spark.sparkContext._jvm.org.apache.hadoop.fs.Path.return_value = mock_path
+    mock_path_cls = hadoop_sink.spark.sparkContext._jvm.org.apache.hadoop.fs.Path
+    mock_path_cls.return_value = mock_path
     hadoop_sink.spark.sparkContext._jvm.org.apache.hadoop.conf.Configuration.return_value = MagicMock()
 
     assert hadoop_sink.validate_connection() is True
+    mock_path_cls.assert_called_once_with("hdfs://namenode:9000/")

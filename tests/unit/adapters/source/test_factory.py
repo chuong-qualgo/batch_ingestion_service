@@ -36,7 +36,7 @@ def test_source_config_factory_table_types(adapter_type):
     cfg = SourceConfigFactory.create(
         adapter_type=adapter_type,
         credential_ref="ref",
-        host="host", port=5432, database="db", table="tbl",
+        database="db", table="tbl",
     )
     assert isinstance(cfg, TableSourceConfig)
 
@@ -46,7 +46,7 @@ def test_source_config_factory_path_types(adapter_type):
     cfg = SourceConfigFactory.create(
         adapter_type=adapter_type,
         credential_ref="ref",
-        path="s3://bucket/path/",
+        file_format=PathSourceConfig.FileFormat.PARQUET,
     )
     assert isinstance(cfg, PathSourceConfig)
 
@@ -56,7 +56,7 @@ def test_source_config_factory_missing_required_raises():
         SourceConfigFactory.create(
             adapter_type=ReadAdapterType.SQL,
             credential_ref="ref",
-            host="", port=5432, database="db", table="tbl",
+            database="", table="tbl",  # empty database triggers the error
         )
 
 
@@ -72,7 +72,6 @@ def test_source_config_factory_unknown_type_raises():
 
 def test_sink_config_factory_creates_config(table_source_config):
     cfg = SinkConfigFactory.create(
-        endpoint="hdfs://namenode:9000",
         credential_ref="ref",
         source_system_name="postgres-prod",
         source_config=table_source_config,
@@ -80,16 +79,19 @@ def test_sink_config_factory_creates_config(table_source_config):
         ingestion_time=datetime(2024, 1, 15, 10, 0, 0),
         run_id="run-001",
     )
-    assert cfg.endpoint == "hdfs://namenode:9000"
+    # endpoint is empty until inject_connection() is called
+    assert cfg.endpoint == ""
     assert cfg.run_id == "run-001"
+    # simulate inject_connection
+    SinkConfigFactory.inject_connection(cfg, {"endpoint": "hdfs://namenode:9000"})
+    assert cfg.endpoint == "hdfs://namenode:9000"
 
 
-def test_sink_config_factory_missing_endpoint_raises(table_source_config):
+def test_sink_config_factory_missing_source_system_raises(table_source_config):
     with pytest.raises(ValueError):
         SinkConfigFactory.create(
-            endpoint="",
             credential_ref="ref",
-            source_system_name="sys",
+            source_system_name="",      # missing source_system_name triggers error
             source_config=table_source_config,
             ingestion_date=date(2024, 1, 1),
             ingestion_time=datetime(2024, 1, 1),
@@ -145,6 +147,7 @@ def test_read_adapter_factory_unknown_raises(mock_spark, table_source_config):
 ])
 def test_write_adapter_factory_registry(write_type, expected_class, mock_spark, sink_config):
     config = AdapterConfig(write_type=write_type)
+    # endpoint already injected in conftest sink_config fixture
     adapter = WriteAdapterFactory.create(
         config=config, spark=mock_spark,
         sink_config=sink_config, credentials={},

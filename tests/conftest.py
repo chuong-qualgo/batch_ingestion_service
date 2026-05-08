@@ -14,33 +14,40 @@ from adapters.metric.base_metric_adapter import RedisMetricConfig, SQSMetricConf
 
 @pytest.fixture
 def table_source_config():
-    return TableSourceConfig(
+    # host and port injected from OpenBao — not set in config
+    cfg = TableSourceConfig(
         credential_ref="data-processor/postgres",
-        host="localhost",
-        port=5432,
         database="orders_db",
         schema="public",
         table="orders",
         checkpoint_column="updated_at",
     )
+    # Simulate inject_connection() as InitOperator would do
+    cfg.host = "localhost"
+    cfg.port = 5432
+    return cfg
 
 
 @pytest.fixture
 def path_source_config():
-    return PathSourceConfig(
+    # path injected from OpenBao — not set in config
+    cfg = PathSourceConfig(
         credential_ref="data-processor/s3",
-        path="s3://raw-bucket/exports/",
         file_format=PathSourceConfig.FileFormat.PARQUET,
         checkpoint_column="event_time",
     )
+    # Simulate inject_connection() as InitOperator would do
+    cfg.path = "s3://raw-bucket/exports/"
+    return cfg
 
 
 # ── Sink config ───────────────────────────────────────────────────────────
 
 @pytest.fixture
 def sink_config(table_source_config):
-    return SinkConfig(
-        endpoint="hdfs://namenode:9000",
+    # endpoint injected from OpenBao — not set until inject_connection() is called
+    cfg = SinkConfig(
+        endpoint="",
         credential_ref="data-platform/hadoop",
         source_system_name="postgres-prod",
         ingestion_date=date(2024, 1, 15),
@@ -48,6 +55,9 @@ def sink_config(table_source_config):
         run_id="scheduled__2024-01-15",
         source_config=table_source_config,
     )
+    # Simulate inject_connection() as InitOperator would do
+    cfg.endpoint = "hdfs://namenode:9000"
+    return cfg
 
 
 # ── Credentials ───────────────────────────────────────────────────────────
@@ -71,12 +81,14 @@ def sqs_credentials():
     return {
         "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
         "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "aws_region": "ap-southeast-1",
+        "queue_url": "https://sqs.ap-southeast-1.amazonaws.com/123456789/metrics",
     }
 
 
 @pytest.fixture
 def redis_credentials():
-    return {"password": "redispass"}
+    return {"host": "localhost", "port": "6379", "password": "redispass"}
 
 
 # ── Metric configs ────────────────────────────────────────────────────────

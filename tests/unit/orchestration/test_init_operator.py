@@ -4,7 +4,7 @@ Unit tests for InitOperator and RunContext.
 All external I/O is mocked:
   - OpenBaoHook.get_secret
   - InitOperator._fetch_checkpoint_from  (MongoDB)
-  - InitOperator._fetch_source_record_count  (Spark)
+  - InitOperator._fetch_checkpoint_to  (Spark)
   - InitOperator._load_config  (YAML file)
   - Airflow context (dag, run_id, xcom)
 """
@@ -31,8 +31,7 @@ BASE_CFG = {
     "metric_type": "onprem_queue",
     "source": {
         "credential_ref": "data-processor/postgres",
-        "host": "localhost",
-        "port": 5432,
+        # host and port come from OpenBao, not YAML
         "database": "orders_db",
         "schema": "public",
         "table": "orders",
@@ -40,13 +39,12 @@ BASE_CFG = {
     },
     "sink": {
         "credential_ref": "data-platform/hadoop",
-        "endpoint": "hdfs://namenode:9000",
+        # endpoint comes from OpenBao, not YAML
         "source_system_name": "postgres-prod",
     },
     "metric": {
         "credential_ref": "data-platform/redis",
-        "host": "redis.infra.svc.cluster.local",
-        "port": 6379,
+        # host and port come from OpenBao, not YAML
         "stream_name": "pipeline-metrics",
         "max_len": 5000,
     },
@@ -123,13 +121,13 @@ def test_execute_fetches_metric_credentials(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=100
+        operator, "_fetch_checkpoint_to", return_value=100
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.side_effect = lambda ref: {
-            "data-processor/postgres": {"username": "pg", "password": "pg_pass"},
-            "data-platform/hadoop":    {"hdfs_user": "hadoop"},
-            "data-platform/redis":     {"password": "redis_pass"},
+            "data-processor/postgres": {"host": "localhost", "port": "5432", "username": "pg", "password": "pg_pass"},
+            "data-platform/hadoop":    {"endpoint": "hdfs://namenode:9000", "hdfs_user": "hadoop"},
+            "data-platform/redis":     {"host": "redis-host", "port": "6379", "password": "redis_pass"},
         }[ref]
         mock_hook_cls.return_value = mock_hook
 
@@ -151,19 +149,20 @@ def test_execute_metric_credentials_in_run_context(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.side_effect = lambda ref: {
-            "data-processor/postgres": {"username": "pg", "password": "pg_pass"},
-            "data-platform/hadoop":    {"hdfs_user": "hadoop"},
-            "data-platform/redis":     {"password": "redis_pass"},
+            "data-processor/postgres": {"host": "localhost", "port": "5432", "username": "pg", "password": "pg_pass"},
+            "data-platform/hadoop":    {"endpoint": "hdfs://namenode:9000", "hdfs_user": "hadoop"},
+            "data-platform/redis":     {"host": "redis-host", "port": "6379", "password": "redis_pass"},
         }[ref]
         mock_hook_cls.return_value = mock_hook
 
         result = operator.execute(airflow_context)
 
-        assert result["metric_credentials"] == {"password": "redis_pass"}
+        assert result["metric_credentials"]["password"] == "redis_pass"
+        assert result["metric_credentials"]["host"] == "redis-host"
 
 
 def test_execute_metric_config_raw_in_run_context(operator, airflow_context):
@@ -175,16 +174,20 @@ def test_execute_metric_config_raw_in_run_context(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
-        mock_hook.get_secret.return_value = {"key": "val"}
+        mock_hook.get_secret.side_effect = lambda ref: {
+            "data-processor/postgres": {"host": "localhost", "port": "5432", "username": "pg", "password": "pg_pass"},
+            "data-platform/hadoop":    {"endpoint": "hdfs://namenode:9000", "hdfs_user": "hadoop"},
+            "data-platform/redis":     {"host": "redis-host", "port": "6379", "password": "redis_pass"},
+        }.get(ref, {"key": "val"})
         mock_hook_cls.return_value = mock_hook
 
         result = operator.execute(airflow_context)
 
         assert result["metric_config_raw"]["stream_name"] == "pipeline-metrics"
-        assert result["metric_config_raw"]["host"] == "redis.infra.svc.cluster.local"
+        # host is no longer in YAML/metric_config_raw — it comes from OpenBao credentials
         assert result["metric_config_raw"]["credential_ref"] == "data-platform/redis"
 
 
@@ -202,7 +205,7 @@ def test_execute_no_metric_section_skips_credential_fetch(
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.side_effect = lambda ref: {
@@ -241,7 +244,7 @@ def test_execute_metric_credential_ref_missing_skips(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.side_effect = lambda ref: {
@@ -266,12 +269,16 @@ def test_execute_run_context_has_all_fields(operator, airflow_context):
     ), patch(
         "orchestration.operators.init_operator.OpenBaoHook"
     ) as mock_hook_cls, patch.object(
-        operator, "_fetch_checkpoint_from", return_value="2024-01-01 00:00:00"
+        operator, "_fetch_checkpoint_from", return_value=42
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=42
+        operator, "_fetch_checkpoint_to", return_value=1000
     ):
         mock_hook = MagicMock()
-        mock_hook.get_secret.return_value = {"key": "val"}
+        mock_hook.get_secret.side_effect = lambda ref: {
+            "data-processor/postgres": {"host": "localhost", "port": "5432", "username": "pg", "password": "pg_pass"},
+            "data-platform/hadoop":    {"endpoint": "hdfs://namenode:9000", "hdfs_user": "hadoop"},
+            "data-platform/redis":     {"host": "redis-host", "port": "6379", "password": "redis_pass"},
+        }.get(ref, {"key": "val"})
         mock_hook_cls.return_value = mock_hook
 
         result = operator.execute(airflow_context)
@@ -283,6 +290,7 @@ def test_execute_run_context_has_all_fields(operator, airflow_context):
         "source_credentials", "sink_credentials",
         "metric_credentials", "metric_config_raw",
         "checkpoint_from",
+        "checkpoint_to",
     ]
     for key in required_keys:
         assert key in result, f"Missing key in RunContext: {key}"
@@ -297,7 +305,7 @@ def test_execute_xcom_push_called(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.return_value = {}
@@ -312,16 +320,16 @@ def test_execute_xcom_push_called(operator, airflow_context):
     assert isinstance(call_kwargs["value"], dict)
 
 
-def test_execute_checkpoint_from_in_result(operator, airflow_context):
-    """checkpoint_from fetched from MongoDB must appear in the result."""
+def test_execute_checkpoint_from_int_in_result(operator, airflow_context):
+    """Integer checkpoint_from is serialised as {"t": "int", "v": <n>} in XCom."""
     with patch.object(
         operator, "_load_config", return_value=BASE_CFG
     ), patch(
         "orchestration.operators.init_operator.OpenBaoHook"
     ) as mock_hook_cls, patch.object(
-        operator, "_fetch_checkpoint_from", return_value="2024-01-10 08:00:00"
+        operator, "_fetch_checkpoint_from", return_value=500
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.return_value = {}
@@ -329,7 +337,28 @@ def test_execute_checkpoint_from_in_result(operator, airflow_context):
 
         result = operator.execute(airflow_context)
 
-    assert result["checkpoint_from"] == "2024-01-10 08:00:00"
+    assert result["checkpoint_from"] == {"t": "int", "v": 500}
+
+
+def test_execute_checkpoint_from_datetime_in_result(operator, airflow_context):
+    """Datetime checkpoint_from is serialised as {"t": "ts", "v": <iso>} in XCom."""
+    ckpt_dt = datetime(2024, 1, 10, 8, 0, 0)
+    with patch.object(
+        operator, "_load_config", return_value=BASE_CFG
+    ), patch(
+        "orchestration.operators.init_operator.OpenBaoHook"
+    ) as mock_hook_cls, patch.object(
+        operator, "_fetch_checkpoint_from", return_value=ckpt_dt
+    ), patch.object(
+        operator, "_fetch_checkpoint_to", return_value=0
+    ):
+        mock_hook = MagicMock()
+        mock_hook.get_secret.return_value = {}
+        mock_hook_cls.return_value = mock_hook
+
+        result = operator.execute(airflow_context)
+
+    assert result["checkpoint_from"] == {"t": "ts", "v": ckpt_dt.isoformat()}
 
 
 def test_execute_no_checkpoint_returns_none(operator, airflow_context):
@@ -340,7 +369,7 @@ def test_execute_no_checkpoint_returns_none(operator, airflow_context):
     ) as mock_hook_cls, patch.object(
         operator, "_fetch_checkpoint_from", return_value=None
     ), patch.object(
-        operator, "_fetch_source_record_count", return_value=0
+        operator, "_fetch_checkpoint_to", return_value=0
     ):
         mock_hook = MagicMock()
         mock_hook.get_secret.return_value = {}
@@ -374,7 +403,7 @@ def test_run_context_to_dict_includes_metric_fields(
             "stream_name": "metrics",
             "credential_ref": "data-platform/redis",
         },
-        checkpoint_from="2024-01-01",
+        checkpoint_from=datetime(2024, 1, 1),
     )
     d = ctx.to_dict()
     assert d["metric_credentials"] == {"password": "redis_pass"}
@@ -402,7 +431,7 @@ def test_run_context_from_dict_roundtrip(table_source_config, sink_config):
             "stream_name": "metrics",
             "credential_ref": "data-platform/redis",
         },
-        checkpoint_from="2024-01-10",
+        checkpoint_from=datetime(2024, 1, 10),
     )
 
     restored = RunContext.from_dict(ctx.to_dict())
@@ -410,7 +439,62 @@ def test_run_context_from_dict_roundtrip(table_source_config, sink_config):
     assert restored.metric_credentials == {"password": "redis_pass"}
     assert restored.metric_config_raw["stream_name"] == "metrics"
     assert restored.metric_type == MetricAdapterType.ONPREM_QUEUE
-    assert restored.checkpoint_from == "2024-01-10"
+    assert restored.checkpoint_from == datetime(2024, 1, 10)
+
+
+def test_run_context_checkpoint_int_roundtrip(table_source_config, sink_config):
+    """Integer checkpoint values survive to_dict() → from_dict() unchanged."""
+    ctx = RunContext(
+        dag_id="d", run_id="r",
+        ingestion_date=date(2024, 1, 1),
+        ingestion_time=datetime(2024, 1, 1),
+        read_type=ReadAdapterType.SQL, write_type=WriteAdapterType.HADOOP,
+        metric_type=MetricAdapterType.CLOUD_QUEUE,
+        source_config=table_source_config, sink_config=sink_config,
+        source_credentials={}, sink_credentials={},
+        metric_credentials={}, metric_config_raw={},
+        checkpoint_from=100, checkpoint_to=999,
+    )
+    restored = RunContext.from_dict(ctx.to_dict())
+    assert restored.checkpoint_from == 100
+    assert restored.checkpoint_to == 999
+
+
+def test_run_context_checkpoint_datetime_roundtrip(table_source_config, sink_config):
+    """Datetime checkpoint values survive to_dict() → from_dict() unchanged."""
+    dt_from = datetime(2024, 3, 1, 0, 0, 0)
+    dt_to   = datetime(2024, 3, 31, 23, 59, 59)
+    ctx = RunContext(
+        dag_id="d", run_id="r",
+        ingestion_date=date(2024, 3, 1),
+        ingestion_time=datetime(2024, 3, 1),
+        read_type=ReadAdapterType.SQL, write_type=WriteAdapterType.HADOOP,
+        metric_type=MetricAdapterType.CLOUD_QUEUE,
+        source_config=table_source_config, sink_config=sink_config,
+        source_credentials={}, sink_credentials={},
+        metric_credentials={}, metric_config_raw={},
+        checkpoint_from=dt_from, checkpoint_to=dt_to,
+    )
+    restored = RunContext.from_dict(ctx.to_dict())
+    assert restored.checkpoint_from == dt_from
+    assert restored.checkpoint_to == dt_to
+
+
+def test_run_context_checkpoint_none_roundtrip(table_source_config, sink_config):
+    """None checkpoints (full-read mode) survive serialisation as None."""
+    ctx = RunContext(
+        dag_id="d", run_id="r",
+        ingestion_date=date(2024, 1, 1),
+        ingestion_time=datetime(2024, 1, 1),
+        read_type=ReadAdapterType.SQL, write_type=WriteAdapterType.HADOOP,
+        metric_type=MetricAdapterType.CLOUD_QUEUE,
+        source_config=table_source_config, sink_config=sink_config,
+        source_credentials={}, sink_credentials={},
+        metric_credentials={}, metric_config_raw={},
+    )
+    restored = RunContext.from_dict(ctx.to_dict())
+    assert restored.checkpoint_from is None
+    assert restored.checkpoint_to is None
 
 
 def test_run_context_from_dict_defaults_empty_metric(table_source_config, sink_config):

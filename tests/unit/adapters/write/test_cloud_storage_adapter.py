@@ -12,8 +12,8 @@ from datetime import date, datetime
 
 @pytest.fixture
 def s3_sink_config(table_source_config):
-    return SinkConfig(
-        endpoint="s3://my-bucket",
+    cfg = SinkConfig(
+        endpoint="",   # injected from OpenBao
         credential_ref="data-platform/s3",
         source_system_name="postgres-prod",
         ingestion_date=date(2024, 1, 15),
@@ -21,6 +21,8 @@ def s3_sink_config(table_source_config):
         run_id="run-001",
         source_config=table_source_config,
     )
+    cfg.endpoint = "s3://my-bucket"   # simulate inject_connection
+    return cfg
 
 
 @pytest.fixture

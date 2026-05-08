@@ -42,8 +42,6 @@ SQL_TO_HADOOP_CFG = {
     "metric_type": "onprem_queue",
     "source": {
         "credential_ref": "data-processor/postgres",
-        "host": "pg-host",
-        "port": 5432,
         "database": "orders_db",
         "schema": "public",
         "table": "orders",
@@ -51,13 +49,10 @@ SQL_TO_HADOOP_CFG = {
     },
     "sink": {
         "credential_ref": "data-platform/hadoop",
-        "endpoint": "hdfs://namenode:9000",
         "source_system_name": "postgres-prod",
     },
     "metric": {
         "credential_ref": "data-platform/redis",
-        "host": "redis-host",
-        "port": 6379,
         "stream_name": "pipeline-metrics",
         "max_len": 1000,
     },
@@ -69,12 +64,10 @@ S3_TO_S3_CFG = {
     "metric_type": "cloud_queue",
     "source": {
         "credential_ref": "data-processor/s3",
-        "path": "s3://raw-bucket/exports/",
         "file_format": "parquet",
     },
     "sink": {
         "credential_ref": "data-platform/s3",
-        "endpoint": "s3://landing-bucket",
         "source_system_name": "sftp-partner",
     },
     "metric": {
@@ -88,12 +81,12 @@ S3_TO_S3_CFG = {
 # ── Shared credential map ─────────────────────────────────────────────────
 
 CREDENTIALS = {
-    "data-processor/postgres": {"username": "pg_user",   "password": "pg_pass"},
-    "data-platform/hadoop":    {"hdfs_user": "hadoop"},
-    "data-platform/redis":     {"password": "redis_pass"},
-    "data-processor/s3":       {"aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET", "aws_region": "ap-southeast-1"},
-    "data-platform/s3":        {"aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET", "aws_region": "ap-southeast-1"},
-    "data-platform/sqs":       {"aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET"},
+    "data-processor/postgres": {"host": "pg-host", "port": "5432", "username": "pg_user", "password": "pg_pass"},
+    "data-platform/hadoop":    {"endpoint": "hdfs://namenode:9000", "hdfs_user": "hadoop"},
+    "data-platform/redis":     {"host": "redis-host", "port": "6379", "password": "redis_pass"},
+    "data-processor/s3":       {"path": "s3://raw-bucket/exports/", "aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET", "aws_region": "ap-southeast-1"},
+    "data-platform/s3":        {"endpoint": "s3://landing-bucket", "aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET", "aws_region": "ap-southeast-1"},
+    "data-platform/sqs":       {"queue_url": "https://sqs.ap-southeast-1.amazonaws.com/123/metrics", "aws_region": "ap-southeast-1", "aws_access_key_id": "AKID", "aws_secret_access_key": "SECRET"},
 }
 
 
@@ -147,14 +140,14 @@ def mock_mongo_with_checkpoint():
     """MongoDB returns an existing checkpoint value."""
     with patch.object(
         InitOperator, "_fetch_checkpoint_from",
-        return_value="2024-01-10 00:00:00"
+        return_value=datetime(2024, 1, 10),
     ):
         yield
 
 
 @pytest.fixture
-def mock_record_count():
-    with patch.object(InitOperator, "_fetch_source_record_count", return_value=500):
+def mock_checkpoint_to():
+    with patch.object(InitOperator, "_fetch_checkpoint_to", return_value=datetime(2024, 1, 15, 14, 30, 0)):
         yield
 
 
@@ -173,15 +166,14 @@ def mock_spark_pipeline(mock_df):
         "adapters.factory.read_adapter_factory.ReadAdapterFactory.create"
     ) as mock_read_factory, patch(
         "adapters.factory.write_adapter_factory.WriteAdapterFactory.create"
-    ) as mock_write_factory, patch.object(
-        SparkRunOperator, "_save_checkpoint"
-    ) as mock_save_ckpt:
+    ) as mock_write_factory:
+        mock_save_ckpt = MagicMock()  # no-op: checkpoint now in MetricPushOperator
 
         mock_spark = MagicMock()
         mock_spark_build.return_value = mock_spark
 
         mock_reader = MagicMock()
-        mock_reader.checkpoint_to = "2024-01-15 14:30:00"
+        mock_reader.checkpoint_to = datetime(2024, 1, 15, 14, 30, 0)
         mock_reader.read.return_value = mock_df
         mock_reader.validate_connection.return_value = True
         mock_read_factory.return_value = mock_reader
@@ -222,7 +214,7 @@ class TestInitOperator:
 
     def test_init_builds_run_context(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """execute() pushes a complete RunContext dict to XCom."""
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -235,7 +227,7 @@ class TestInitOperator:
 
     def test_init_source_credentials_fetched(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         result = op.execute(airflow_context)
@@ -243,7 +235,7 @@ class TestInitOperator:
 
     def test_init_sink_credentials_fetched(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         result = op.execute(airflow_context)
@@ -251,7 +243,7 @@ class TestInitOperator:
 
     def test_init_metric_credentials_fetched(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """Metric credentials are fetched from OpenBao (step 6)."""
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -260,17 +252,17 @@ class TestInitOperator:
 
     def test_init_metric_config_raw_in_context(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """Raw metric section from YAML is preserved in RunContext."""
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         result = op.execute(airflow_context)
         assert result["metric_config_raw"]["stream_name"] == "pipeline-metrics"
-        assert result["metric_config_raw"]["host"] == "redis-host"
+        # host is in credentials, not metric_config_raw
 
     def test_init_no_checkpoint_returns_none(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         result = op.execute(airflow_context)
@@ -278,15 +270,15 @@ class TestInitOperator:
 
     def test_init_existing_checkpoint_passed_through(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_with_checkpoint, mock_record_count
+        mock_mongo_with_checkpoint, mock_checkpoint_to
     ):
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         result = op.execute(airflow_context)
-        assert result["checkpoint_from"] == "2024-01-10 00:00:00"
+        assert result["checkpoint_from"] == {"t": "ts", "v": "2024-01-10T00:00:00"}
 
     def test_init_xcom_pushed(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         op.execute(airflow_context)
@@ -296,7 +288,7 @@ class TestInitOperator:
 
     def test_init_s3_source_config(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """File/S3 source produces PathSourceConfig, not TableSourceConfig."""
         op = make_init(make_yaml(S3_TO_S3_CFG))
@@ -313,7 +305,7 @@ class TestInitToSparkHandoff:
 
     def test_spark_receives_xcom_from_init(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline, mock_df
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline, mock_df
     ):
         """SparkRunOperator pulls RunContext written by InitOperator."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -331,7 +323,7 @@ class TestInitToSparkHandoff:
 
     def test_spark_passes_checkpoint_from_to_reader(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_with_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_with_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """checkpoint_from from MongoDB is forwarded to the source adapter."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -345,13 +337,13 @@ class TestInitToSparkHandoff:
         spark_op.execute(airflow_context)
 
         reader = mock_spark_pipeline["reader"]
-        assert reader.checkpoint_from == "2024-01-10 00:00:00"
+        assert reader.checkpoint_from == datetime(2024, 1, 10)
 
-    def test_spark_saves_checkpoint_after_read(
+    def test_spark_does_not_save_checkpoint(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
-        """checkpoint_to produced by the reader is saved to MongoDB."""
+        """SparkRunOperator no longer saves checkpoint — MetricPushOperator does."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         init_op.execute(airflow_context)
 
@@ -362,13 +354,11 @@ class TestInitToSparkHandoff:
         )
         spark_op.execute(airflow_context)
 
-        mock_spark_pipeline["save_checkpoint"].assert_called_once_with(
-            "test_pipeline", "2024-01-15 14:30:00"
-        )
+        mock_spark_pipeline["save_checkpoint"].assert_not_called()
 
     def test_spark_validates_connections_before_read(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """validate_connection() is called on both source and sink before read."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -386,7 +376,7 @@ class TestInitToSparkHandoff:
 
     def test_spark_pushes_failure_metric_on_error(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """On pipeline failure, push_metric_inline() is called (non-fatal)."""
         fake_redis = fakeredis.FakeRedis(decode_responses=True)
@@ -433,7 +423,7 @@ class TestInitToSparkHandoff:
 
     def test_spark_no_checkpoint_save_when_none(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """If checkpoint_to is None (no checkpoint_column), MongoDB is not written."""
         mock_spark_pipeline["reader"].checkpoint_to = None
@@ -459,7 +449,7 @@ class TestSparkToMetricHandoff:
 
     def test_metric_push_redis_success(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """Full pipeline: init → spark → metric push to Redis Stream."""
         fake_redis = fakeredis.FakeRedis(decode_responses=True)
@@ -504,7 +494,7 @@ class TestSparkToMetricHandoff:
     @mock_aws
     def test_metric_push_sqs_success(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """Full pipeline: init → spark → metric push to SQS."""
         sqs_client = boto3.client("sqs", region_name="ap-southeast-1")
@@ -515,8 +505,7 @@ class TestSparkToMetricHandoff:
             **S3_TO_S3_CFG,
             "metric": {
                 "credential_ref": "data-platform/sqs",
-                "queue_url": queue_url,
-                "aws_region": "ap-southeast-1",
+                "stream_name": "metrics",
             },
         }
 
@@ -541,7 +530,10 @@ class TestSparkToMetricHandoff:
                 task_id="metric_push",
                 init_task_id="init",
                 metric_type=MetricAdapterType.CLOUD_QUEUE,
-                metric_config_raw=cfg["metric"],
+                metric_config_raw={
+                    "credential_ref": "data-platform/sqs",
+                    "stream_name": "metrics",
+                },
                 status="success",
             )
             metric_op.execute(airflow_context)
@@ -556,7 +548,7 @@ class TestSparkToMetricHandoff:
 
     def test_metric_push_enriches_payload_from_run_context(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count, mock_spark_pipeline
+        mock_mongo_no_checkpoint, mock_checkpoint_to, mock_spark_pipeline
     ):
         """MetricPushOperator pulls dag_id, run_id, read_type from XCom."""
         fake_redis = fakeredis.FakeRedis(decode_responses=True)
@@ -604,7 +596,7 @@ class TestRunContextXcom:
 
     def test_run_context_roundtrip_preserves_all_fields(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """RunContext survives to_dict → XCom → from_dict with all fields intact."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -621,10 +613,11 @@ class TestRunContextXcom:
         assert restored.metric_credentials["password"] == "redis_pass"
         assert restored.metric_config_raw["stream_name"] == "pipeline-metrics"
         assert restored.checkpoint_from is None
+        assert restored.checkpoint_to == datetime(2024, 1, 15, 14, 30, 0)
 
     def test_run_context_source_config_type_preserved(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         """SQL source → TableSourceConfig, S3 source → PathSourceConfig after roundtrip."""
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
@@ -639,7 +632,7 @@ class TestRunContextXcom:
 
     def test_run_context_ingestion_dates_correct(
         self, make_yaml, airflow_context, mock_openbao,
-        mock_mongo_no_checkpoint, mock_record_count
+        mock_mongo_no_checkpoint, mock_checkpoint_to
     ):
         init_op = make_init(make_yaml(SQL_TO_HADOOP_CFG))
         serialised = init_op.execute(airflow_context)

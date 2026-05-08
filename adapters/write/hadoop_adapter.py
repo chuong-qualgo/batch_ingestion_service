@@ -105,9 +105,8 @@ class HadoopAdapter(BaseWriteAdapter):
         """
         self._configure_spark_for_filesystem()
         hadoop_conf = self.spark.sparkContext._jvm.org.apache.hadoop.conf.Configuration()
-        fs_path = self.spark.sparkContext._jvm.org.apache.hadoop.fs.Path(
-            self.sink_config.endpoint
-        )
+        root_uri = self.sink_config.endpoint.rstrip("/") + "/"
+        fs_path = self.spark.sparkContext._jvm.org.apache.hadoop.fs.Path(root_uri)
         fs = fs_path.getFileSystem(hadoop_conf)
         return fs.exists(fs_path)
 

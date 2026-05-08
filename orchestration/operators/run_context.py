@@ -10,7 +10,25 @@ from adapters.factory.adapter_config import (
     ReadAdapterType,
     WriteAdapterType,
 )
-from adapters.source.base_read_adapter import PathSourceConfig, TableSourceConfig
+from adapters.source.base_read_adapter import CheckpointValue, PathSourceConfig, TableSourceConfig
+
+
+def _serialise_checkpoint(val: Optional[CheckpointValue]) -> Optional[dict]:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return {"t": "ts", "v": val.isoformat()}
+    return {"t": "int", "v": val}
+
+
+def _deserialise_checkpoint(raw) -> Optional[CheckpointValue]:
+    if raw is None or not isinstance(raw, dict):
+        return None
+    if raw.get("t") == "ts":
+        return datetime.fromisoformat(raw["v"])
+    if raw.get("t") == "int":
+        return int(raw["v"])
+    return None
 from adapters.write.base_write_adapter import SinkConfig
 
 
@@ -52,6 +70,10 @@ class RunContext:
     checkpoint_from : str, optional
         Last successful checkpoint value fetched from MongoDB.
         None means full read — no incremental filter applied.
+    checkpoint_to : str, optional
+        MAX(checkpoint_column) fetched from the source by InitOperator.
+        Passed to SparkRunOperator as the upper bound of the read query.
+        Written to DynamoDB by MetricPushOperator after a successful run.
     """
 
     dag_id: str
@@ -67,7 +89,8 @@ class RunContext:
     sink_credentials: dict
     metric_credentials: dict
     metric_config_raw: dict
-    checkpoint_from: Optional[str] = None
+    checkpoint_from: Optional[CheckpointValue] = None
+    checkpoint_to: Optional[CheckpointValue] = None
 
     # ── XCom serialisation ────────────────────────────────────────────────
 
@@ -79,10 +102,13 @@ class RunContext:
         raw["read_type"] = self.read_type.value
         raw["write_type"] = self.write_type.value
         raw["metric_type"] = self.metric_type.value
-        # metric_credentials and metric_config_raw are plain dicts — serialise as-is
-        # date/datetime → ISO strings
+        # date/datetime → ISO strings (top-level and inside nested sink_config)
         raw["ingestion_date"] = self.ingestion_date.isoformat()
         raw["ingestion_time"] = self.ingestion_time.isoformat()
+        raw["sink_config"]["ingestion_date"] = self.sink_config.ingestion_date.isoformat()
+        raw["sink_config"]["ingestion_time"] = self.sink_config.ingestion_time.isoformat()
+        raw["checkpoint_from"] = _serialise_checkpoint(self.checkpoint_from)
+        raw["checkpoint_to"]   = _serialise_checkpoint(self.checkpoint_to)
         return raw
 
     @classmethod
@@ -101,14 +127,21 @@ class RunContext:
             adapter_type=read_type,
             **data["source_config"],
         )
+        SourceConfigFactory.inject_connection(source_config, data["source_config"])
+        # Reconstruct SinkConfig — endpoint is stored in the serialised dict
+        # and re-injected directly (it was already resolved from OpenBao previously)
+        sink_raw = {k: v for k, v in data["sink_config"].items()
+                    if k not in ("source_config", "ingestion_date", "ingestion_time",
+                                 "run_id", "endpoint", "extra")}
         sink_config = SinkConfigFactory.create(
             source_config=source_config,
             ingestion_date=ingestion_date,
             ingestion_time=ingestion_time,
             run_id=data["run_id"],
-            **{k: v for k, v in data["sink_config"].items()
-               if k not in ("source_config", "ingestion_date", "ingestion_time", "run_id")},
+            **sink_raw,
         )
+        # Re-inject endpoint that was resolved from OpenBao on original execute
+        sink_config.endpoint = data["sink_config"].get("endpoint", "")
 
         return cls(
             dag_id=data["dag_id"],
@@ -124,5 +157,6 @@ class RunContext:
             sink_credentials=data["sink_credentials"],
             metric_credentials=data.get("metric_credentials", {}),
             metric_config_raw=data.get("metric_config_raw", {}),
-            checkpoint_from=data.get("checkpoint_from"),
+            checkpoint_from=_deserialise_checkpoint(data.get("checkpoint_from")),
+            checkpoint_to=_deserialise_checkpoint(data.get("checkpoint_to")),
         )
