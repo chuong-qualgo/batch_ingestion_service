@@ -2,6 +2,7 @@ from adapters.factory.adapter_config import AdapterConfig, MetricAdapterType
 from adapters.metric.base_metric_adapter import BaseMetricAdapter, MetricConfig
 from adapters.metric.sqs_queue_adapter import SQSQueueAdapter
 from adapters.metric.redis_queue_adapter import RedisQueueAdapter
+from adapters.metric.kafka_queue_adapter import KafkaQueueAdapter
 
 
 class MetricAdapterFactory:
@@ -11,8 +12,9 @@ class MetricAdapterFactory:
 
     Registry
     --------
-    MetricAdapterType.CLOUD_QUEUE  → SQSQueueAdapter  (AWS SQS)
-    MetricAdapterType.ONPREM_QUEUE → RedisQueueAdapter (Redis Streams)
+    MetricAdapterType.CLOUD_QUEUE  → SQSQueueAdapter   (AWS SQS)
+    MetricAdapterType.ONPREM_QUEUE → RedisQueueAdapter  (Redis Streams)
+    MetricAdapterType.KAFKA_QUEUE  → KafkaQueueAdapter  (Apache Kafka)
 
     Raises
     ------
@@ -23,6 +25,7 @@ class MetricAdapterFactory:
     _registry: dict[MetricAdapterType, type[BaseMetricAdapter]] = {
         MetricAdapterType.CLOUD_QUEUE:  SQSQueueAdapter,
         MetricAdapterType.ONPREM_QUEUE: RedisQueueAdapter,
+        MetricAdapterType.KAFKA_QUEUE:  KafkaQueueAdapter,
     }
 
     @classmethod

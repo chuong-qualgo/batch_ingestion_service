@@ -184,16 +184,15 @@ if [ ! -f "$INIT_MARKER" ]; then
       username=orders_user \
       password=orders_pass \
       host=postgres \
-      port=5432 >/dev/null 2>&1 && echo "  ✓ postgres" || echo "  ✗ postgres"
+      port=5432 \
+      jars=/home/airflow/jars/postgresql-42.7.3.jar >/dev/null 2>&1 && echo "  ✓ postgres" || echo "  ✗ postgres"
     
     bao kv put -address="http://127.0.0.1:8200" secret/data-platform/hadoop \
       hdfs_user=hadoop \
       endpoint=hdfs://namenode:9000 >/dev/null 2>&1 && echo "  ✓ hadoop" || echo "  ✗ hadoop"
     
-    bao kv put -address="http://127.0.0.1:8200" secret/data-platform/redis \
-      password=redis_pass \
-      host=redis \
-      port=6379 >/dev/null 2>&1 && echo "  ✓ redis" || echo "  ✗ redis"
+    bao kv put -address="http://127.0.0.1:8200" secret/data-platform/kafka \
+      bootstrap_servers=kafka:9092 >/dev/null 2>&1 && echo "  ✓ kafka" || echo "  ✗ kafka"
     
     # Mark initialization complete
     touch "$INIT_MARKER"

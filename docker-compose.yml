@@ -8,19 +8,17 @@
 #   datanode    — Hadoop HDFS DataNode
 #   spark       — Spark master + worker (standalone mode)
 #   airflow     — Airflow scheduler + webserver + worker (CeleryExecutor)
-#   mongo       — MongoDB checkpoint store
 #   openbao     — Secret manager (OpenBao)
-#   redis       — Celery broker (Redis)
+#   kafka       — Metric queue (Apache Kafka KRaft)
 #   mongo-express — MongoDB data viewer
 #   pgadmin     — PostgreSQL data viewer
-#   redis-commander — Redis data viewer
+#   kafka-ui    — Kafka topic viewer
 #
 # Usage:
 #   docker compose up -d
 #   open http://localhost:8080   → Airflow UI  (admin / admin)
-#   open http://localhost:8081   → Mongo Express (admin / admin_pass)
 #   open http://localhost:5050   → pgAdmin (admin@example.com / admin_pass)
-#   open http://localhost:8082   → Redis Commander
+#   open http://localhost:8082   → Kafka UI
 #   open http://localhost:9870   → Hadoop NameNode UI
 #   open http://localhost:9864   → Hadoop DataNode UI
 #   open http://localhost:8090   → Spark UI
@@ -34,7 +32,6 @@ volumes:
   postgres-data:
   hdfs-namenode:
   hdfs-datanode:
-  mongo-data:
   openbao-data:
   airflow-logs:
   airflow-plugins:
@@ -180,30 +177,6 @@ services:
     memswap_limit: 3g
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MongoDB — checkpoint store
-# ─────────────────────────────────────────────────────────────────────────────
-  mongo:
-    image: mongo:7.0
-    container_name: fls-mongo
-    hostname: mongo
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: mongo_user
-      MONGO_INITDB_ROOT_PASSWORD: mongo_pass
-      MONGO_INITDB_DATABASE: config
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
-      - ./demo/mongo-init/01_init.js:/docker-entrypoint-initdb.d/01_init.js
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - landing-net
-
-# ─────────────────────────────────────────────────────────────────────────────
 # OpenBao — secret manager
 # ─────────────────────────────────────────────────────────────────────────────
   openbao:
@@ -232,18 +205,30 @@ services:
 # ─────────────────────────────────────────────────────────────────────────────
 # Redis — metric queue (Redis Streams)
 # ─────────────────────────────────────────────────────────────────────────────
-  redis:
-    image: redis:7.2-alpine
-    container_name: fls-redis
-    hostname: redis
-    command: ["redis-server", "--requirepass", "redis_pass", "--loglevel", "notice"]
+# ─────────────────────────────────────────────────────────────────────────────
+# Apache Kafka — metric queue (KRaft mode, no ZooKeeper)
+# ─────────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: apache/kafka:latest
+    container_name: fls-kafka
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_CLEANUP_POLICY: delete
+      KAFKA_LOG_RETENTION_HOURS: 24
     ports:
-      - "6379:6379"
+      - "9092:9092"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "redis_pass", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      test: ["CMD", "sh", "-c", "exit 0"]
+      interval: 1s
     networks:
       - landing-net
 
@@ -258,9 +243,7 @@ services:
     container_name: fls-airflow-scheduler
     command: scheduler
     environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
       AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
       AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
@@ -270,48 +253,20 @@ services:
       HADOOP_USER_NAME: hadoop
     volumes:
       - ./demo/airflow/dags:/opt/airflow/dags
+      - ./demo/airflow/config:/opt/airflow/app/config
       - airflow-logs:/opt/airflow/logs
       - airflow-plugins:/opt/airflow/plugins
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
+      kafka:
         condition: service_healthy
       namenode:
         condition: service_healthy
     networks:
       - landing-net
 
-  airflow-worker:
-    build:
-      context: .
-      dockerfile: demo/airflow/Dockerfile
-    container_name: fls-airflow-worker
-    command: celery worker
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
-      AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
-      AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
-      PYTHONPATH: /opt/airflow/app
-      HADOOP_USER_NAME: hadoop
-    volumes:
-      - ./demo/airflow/dags:/opt/airflow/dags
-      - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - landing-net
+
 
   airflow-webserver:
     build:
@@ -320,9 +275,7 @@ services:
     container_name: fls-airflow-webserver
     command: webserver
     environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__CELERY__BROKER_URL: redis://:redis_pass@redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://orders_user:orders_pass@postgres/orders_db
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://orders_user:orders_pass@postgres/orders_db
       AIRFLOW__CORE__FERNET_KEY: "poc-TdXP_zYXGbOGmp6j7MFEpI52UaSf1KEPt-sFagg="
       AIRFLOW__WEBSERVER__SECRET_KEY: "demo_webserver_secret"
@@ -332,12 +285,13 @@ services:
       - "8080:8080"   # Airflow web UI
     volumes:
       - ./demo/airflow/dags:/opt/airflow/dags
+      - ./demo/airflow/config:/opt/airflow/app/config
       - airflow-logs:/opt/airflow/logs
       - airflow-plugins:/opt/airflow/plugins
     depends_on:
       postgres:
         condition: service_healthy
-      airflow-worker:
+      airflow-scheduler:
         condition: service_started
     networks:
       - landing-net
@@ -346,31 +300,6 @@ services:
       interval: 10s
       timeout: 10s
       retries: 20
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Mongo Express — MongoDB data viewer
-# ─────────────────────────────────────────────────────────────────────────────
-  mongo-express:
-    image: mongo-express:latest
-    container_name: fls-mongo-express
-    environment:
-      ME_CONFIG_MONGODB_ADMINUSERNAME: mongo_user
-      ME_CONFIG_MONGODB_ADMINPASSWORD: mongo_pass
-      ME_CONFIG_MONGODB_URL: mongodb://mongo_user:mongo_pass@mongo:27017/
-      ME_CONFIG_BASICAUTH_USERNAME: admin
-      ME_CONFIG_BASICAUTH_PASSWORD: admin_pass
-    ports:
-      - "8081:8081"   # Mongo Express web UI
-    depends_on:
-      mongo:
-        condition: service_healthy
-    networks:
-      - landing-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 # ─────────────────────────────────────────────────────────────────────────────
 # pgAdmin — PostgreSQL data viewer
@@ -392,27 +321,30 @@ services:
       - landing-net
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:80/misc/ping || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Redis Commander — Redis data viewer
+# Kafka UI — Kafka topic viewer
 # ─────────────────────────────────────────────────────────────────────────────
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    container_name: fls-redis-commander
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: fls-kafka-ui
     environment:
-      REDIS_HOSTS: local:redis:6379:0:redis_pass
+      KAFKA_CLUSTERS_0_NAME: demo
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
     ports:
-      - "8082:8081"   # Redis Commander web UI
+      - "8082:8080"   # Kafka UI web UI
     depends_on:
-      redis:
+      kafka:
         condition: service_healthy
     networks:
       - landing-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s

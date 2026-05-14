@@ -91,6 +91,7 @@ class RunContext:
     metric_config_raw: dict
     checkpoint_from: Optional[CheckpointValue] = None
     checkpoint_to: Optional[CheckpointValue] = None
+    count_records: bool = False
 
     # ── XCom serialisation ────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ class RunContext:
         raw["sink_config"]["ingestion_time"] = self.sink_config.ingestion_time.isoformat()
         raw["checkpoint_from"] = _serialise_checkpoint(self.checkpoint_from)
         raw["checkpoint_to"]   = _serialise_checkpoint(self.checkpoint_to)
+        raw["count_records"]   = self.count_records
         return raw
 
     @classmethod
@@ -159,4 +161,5 @@ class RunContext:
             metric_config_raw=data.get("metric_config_raw", {}),
             checkpoint_from=_deserialise_checkpoint(data.get("checkpoint_from")),
             checkpoint_to=_deserialise_checkpoint(data.get("checkpoint_to")),
+            count_records=data.get("count_records", False),
         )

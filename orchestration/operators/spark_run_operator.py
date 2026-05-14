@@ -14,6 +14,8 @@ from orchestration.plugins.openbao_hook import OpenBaoHook
 
 log = logging.getLogger(__name__)
 
+_LARGE_COUNT_THRESHOLD = 5_000_000   # rows — warn above this
+
 
 class SparkRunOperator(BaseOperator):
     """
@@ -48,7 +50,7 @@ class SparkRunOperator(BaseOperator):
         Task id of the upstream InitOperator to pull XCom from.
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.
-    mongo_conn_id : str
+    checkpoint_conn_id : str
         Airflow connection id for MongoDB checkpoint store (kept for
         future use but checkpoint writes now handled by MetricPushOperator).
     spark_app_name : str, optional
@@ -69,7 +71,7 @@ class SparkRunOperator(BaseOperator):
         self,
         init_task_id: str,
         xcom_key: str = "run_context",
-        mongo_conn_id: str = "mongo_checkpoint",
+        checkpoint_conn_id: str = "mongo_checkpoint",
         spark_app_name: Optional[str] = None,
         spark_config: Optional[dict] = None,
         metric_type: Optional[MetricAdapterType] = None,
@@ -80,7 +82,7 @@ class SparkRunOperator(BaseOperator):
         super().__init__(**kwargs)
         self.init_task_id = init_task_id
         self.xcom_key = xcom_key
-        self.mongo_conn_id = mongo_conn_id
+        self.checkpoint_conn_id = checkpoint_conn_id
         self.spark_app_name = spark_app_name
         self.spark_config = spark_config or {}
         self.metric_type = metric_type
@@ -115,9 +117,13 @@ class SparkRunOperator(BaseOperator):
             )
 
             # ── 2. Build SparkSession ─────────────────────────────────────
+            extra_spark = dict(self.spark_config)
+            jars = run_ctx.source_config.extra.get("jars")
+            if jars:
+                extra_spark.setdefault("spark.jars", jars)
             spark = self._build_spark_session(
                 app_name=self.spark_app_name or dag_id,
-                extra_config=self.spark_config,
+                extra_config=extra_spark,
             )
             log.info("[SparkRunOperator] SparkSession ready — app=%s", spark.sparkContext.appName)
 
@@ -169,10 +175,29 @@ class SparkRunOperator(BaseOperator):
                 run_ctx.checkpoint_to,
             )
 
+            # ── 8b. Count records (optional) ──────────────────────────────
+            if run_ctx.count_records:
+                df.cache()
+                record_count: int = df.count()
+                log.info("[SparkRunOperator] record_count=%d", record_count)
+                if record_count > _LARGE_COUNT_THRESHOLD:
+                    log.warning(
+                        "[SparkRunOperator] Large dataset: %d rows exceed threshold %d. "
+                        "df.cache() is holding this in executor memory until write completes. "
+                        "Increase spark.executor.memory or spark.memory.fraction if you see "
+                        "OOM / excessive GC.",
+                        record_count, _LARGE_COUNT_THRESHOLD,
+                    )
+                context["ti"].xcom_push(key="record_count", value=record_count)
+            else:
+                log.info("[SparkRunOperator] record counting disabled (count_records: false)")
+
             # ── 9. Write to sink ──────────────────────────────────────────
             write_path = sink_adapter.build_write_path()
             log.info("[SparkRunOperator] Writing to sink — path=%s", write_path)
             sink_adapter.write(df)
+            if run_ctx.count_records:
+                df.unpersist()
             log.info("[SparkRunOperator] Write complete")
 
             # checkpoint_to persistence is handled by MetricPushOperator

@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir \
     pymongo==4.7.0 \
     hvac==2.1.0 \
     PyYAML==6.0.1 \
-    redis==5.0.4 \
+    kafka-python==2.0.2 \
     boto3==1.34.0
 
 # ── Download PostgreSQL JDBC driver ───────────────────────────────────────────

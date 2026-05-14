@@ -54,6 +54,27 @@ class SQSMetricConfig(MetricConfig):
     aws_region: str = ""
 
 
+@dataclass
+class KafkaMetricConfig(MetricConfig):
+    """
+    Config for Apache Kafka metric sink.
+
+    Attributes
+    ----------
+    bootstrap_servers : str
+        Comma-separated broker list — populated from OpenBao secret at runtime.
+        Example: broker1:9092,broker2:9092
+    topic : str
+        Kafka topic to publish messages to.
+        Non-sensitive — kept in YAML config.
+    key : str, optional
+        Message key for partition routing. None means no key (round-robin).
+    """
+    bootstrap_servers: str = ""
+    topic: str = ""
+    key: Optional[str] = None
+
+
 class BaseMetricAdapter(ABC):
     """
     Abstract base class for all metric/event adapters.

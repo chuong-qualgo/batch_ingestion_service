@@ -105,6 +105,8 @@ class SourceConfigFactory:
                 config.host = credentials["host"]
             if "port" in credentials:
                 config.port = int(credentials["port"])
+            if "jars" in credentials:
+                config.extra["jars"] = credentials["jars"]
 
         elif isinstance(config, PathSourceConfig):
             if "path" in credentials:
@@ -120,6 +122,7 @@ class SourceConfigFactory:
         query: str = None,
         checkpoint_column: str = None,
         extra: dict = None,
+        read_options: dict = None,
         **_ignored,
     ) -> TableSourceConfig:
         cls._require(database=database, table=table)
@@ -131,6 +134,7 @@ class SourceConfigFactory:
             query=query,
             checkpoint_column=checkpoint_column,
             extra=extra or {},
+            read_options=read_options or {},
         )
 
     @classmethod
@@ -140,6 +144,7 @@ class SourceConfigFactory:
         file_format: PathSourceConfig.FileFormat = PathSourceConfig.FileFormat.PARQUET,
         checkpoint_column: str = None,
         extra: dict = None,
+        read_options: dict = None,
         **_ignored,
     ) -> PathSourceConfig:
         # path is intentionally not required here — comes from OpenBao
@@ -148,6 +153,7 @@ class SourceConfigFactory:
             file_format=file_format,
             checkpoint_column=checkpoint_column,
             extra=extra or {},
+            read_options=read_options or {},
         )
 
     @staticmethod

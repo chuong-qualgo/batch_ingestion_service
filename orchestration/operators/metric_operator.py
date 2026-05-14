@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import psycopg2
 from airflow.hooks.base import BaseHook
 from airflow.models import BaseOperator
-from pymongo import MongoClient
 from airflow.utils.context import Context
 
 from adapters.factory.adapter_config import AdapterConfig, MetricAdapterType
@@ -14,6 +14,7 @@ from adapters.factory.metric_adapter_factory import MetricAdapterFactory
 from adapters.metric.base_metric_adapter import (
     BaseMetricAdapter,
     MetricConfig,
+    KafkaMetricConfig,
     RedisMetricConfig,
     SQSMetricConfig,
 )
@@ -52,6 +53,15 @@ def _build_metric_adapter(
             stream_name=metric_config_raw.get("stream_name", ""),
             max_len=metric_config_raw.get("max_len", 1000),
             extra=metric_config_raw.get("extra", {}),
+        )
+    elif metric_type == MetricAdapterType.KAFKA_QUEUE:
+        metric_config = KafkaMetricConfig(
+            credential_ref=credential_ref,
+            bootstrap_servers=credentials.get(
+                "bootstrap_servers", metric_config_raw.get("bootstrap_servers", "")
+            ),
+            topic=metric_config_raw.get("topic", ""),
+            key=metric_config_raw.get("key"),
         )
     else:
         raise ValueError(f"Unsupported metric_type: {metric_type}")
@@ -164,6 +174,10 @@ class MetricPushOperator(BaseOperator):
         When None, checkpoint save is skipped.
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.
+    spark_task_id : str, optional
+        Task id of the upstream SparkRunOperator. When set, pulls
+        'record_count' from that task's XCom and adds it as an int
+        to the metric payload.
     openbao_conn_id : str
         Airflow connection id for OpenBao.
     """
@@ -177,20 +191,22 @@ class MetricPushOperator(BaseOperator):
         metric_config_raw: dict,
         status: str = "success",
         extra_payload: Optional[dict] = None,
-        mongo_conn_id: Optional[str] = None,
+        checkpoint_conn_id: Optional[str] = None,
         xcom_key: str = "run_context",
+        spark_task_id: Optional[str] = None,
         openbao_conn_id: str = OpenBaoHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.init_task_id      = init_task_id
-        self.metric_type       = metric_type
-        self.metric_config_raw = metric_config_raw
-        self.status            = status
-        self.extra_payload     = extra_payload or {}
-        self.mongo_conn_id     = mongo_conn_id
-        self.xcom_key          = xcom_key
-        self.openbao_conn_id   = openbao_conn_id
+        self.init_task_id        = init_task_id
+        self.metric_type         = metric_type
+        self.metric_config_raw   = metric_config_raw
+        self.status              = status
+        self.extra_payload       = extra_payload or {}
+        self.checkpoint_conn_id  = checkpoint_conn_id
+        self.xcom_key            = xcom_key
+        self.spark_task_id       = spark_task_id
+        self.openbao_conn_id     = openbao_conn_id
 
     def execute(self, context: Context) -> None:
         dag_id: str = context["dag"].dag_id
@@ -224,6 +240,15 @@ class MetricPushOperator(BaseOperator):
             redis_metric_config_raw = raw_context.get("redis_metric_config_raw")
             redis_metric_credentials = raw_context.get("redis_metric_credentials")
 
+        record_count: Optional[int] = None
+        if self.spark_task_id:
+            raw_count = context["ti"].xcom_pull(
+                task_ids=self.spark_task_id,
+                key="record_count",
+            )
+            if raw_count is not None:
+                record_count = int(raw_count)
+
         payload = {
             "dag_id":          dag_id,
             "run_id":          context["run_id"],
@@ -238,6 +263,8 @@ class MetricPushOperator(BaseOperator):
             payload["read_type"] = read_type
         if ingestion_date is not None:
             payload["ingestion_date"] = ingestion_date
+        if record_count is not None:
+            payload["record_count"] = record_count
 
         payload.update(self.extra_payload)
 
@@ -256,44 +283,45 @@ class MetricPushOperator(BaseOperator):
         if redis_metric_config_raw and redis_metric_credentials:
             _push_redis_metric(payload, redis_metric_config_raw, redis_metric_credentials)
 
-        # ── 3. Upsert checkpoint_to to MongoDB ────────────────────────────
-        if checkpoint_to and self.mongo_conn_id:
-            self._save_checkpoint_mongo(dag_id, checkpoint_to)
+        # ── 3. Upsert checkpoint_to to PostgreSQL ─────────────────────────
+        if checkpoint_to and self.checkpoint_conn_id:
+            self._save_checkpoint(dag_id, checkpoint_to)
             log.info(
-                "[MetricPushOperator] Checkpoint saved to MongoDB — "
+                "[MetricPushOperator] Checkpoint saved — "
                 "dag_id=%s checkpoint_to=%s",
                 dag_id, checkpoint_to,
             )
         else:
             log.info(
                 "[MetricPushOperator] Checkpoint save skipped — "
-                "checkpoint_to=%s mongo_conn_id=%s",
-                checkpoint_to, self.mongo_conn_id,
+                "checkpoint_to=%s checkpoint_conn_id=%s",
+                checkpoint_to, self.checkpoint_conn_id,
             )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
-    def _save_checkpoint_mongo(self, dag_id: str, checkpoint_to: str) -> None:
-        """
-        Upsert the checkpoint document into MongoDB.
-        """
-        conn = BaseHook.get_connection(self.mongo_conn_id)
-        client = MongoClient(
-            host=conn.host,
-            port=conn.port,
-            username=conn.login,
-            password=conn.password,
+    def _save_checkpoint(self, dag_id: str, checkpoint_to: str) -> None:
+        """Upsert the checkpoint row into PostgreSQL."""
+        conn_cfg = BaseHook.get_connection(self.checkpoint_conn_id)
+        conn = psycopg2.connect(
+            host=conn_cfg.host,
+            port=conn_cfg.port or 5432,
+            dbname=conn_cfg.schema,
+            user=conn_cfg.login,
+            password=conn_cfg.password,
         )
         try:
-            db = client[conn.schema or "config"]
-            db["checkpoints"].replace_one(
-                {"dag_id": dag_id},
-                {
-                    "dag_id":        dag_id,
-                    "checkpoint_to": checkpoint_to,
-                    "updated_at":    datetime.now(tz=timezone.utc).isoformat(),
-                },
-                upsert=True,
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.checkpoints (dag_id, checkpoint_to, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (dag_id) DO UPDATE
+                        SET checkpoint_to = EXCLUDED.checkpoint_to,
+                            updated_at    = NOW()
+                    """,
+                    (dag_id, checkpoint_to),
+                )
+            conn.commit()
         finally:
-            client.close()
+            conn.close()

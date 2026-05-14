@@ -110,6 +110,11 @@ class SQLAdapter(BaseReadAdapter):
         for key, value in self._jdbc_options.items():
             reader = reader.option(key, value)
 
+        # read_options from config applied last — can override fetchsize and add
+        # partition options (numPartitions/partitionColumn/lowerBound/upperBound)
+        for key, value in self.source_config.read_options.items():
+            reader = reader.option(key, value)
+
         if self.schema:
             reader = reader.schema(self.schema)
 

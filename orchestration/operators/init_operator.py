@@ -5,10 +5,10 @@ from datetime import datetime
 from typing import Any, Optional
 
 import yaml
+import psycopg2
 from airflow.hooks.base import BaseHook
 from airflow.models import BaseOperator
 from airflow.utils.context import Context
-from pymongo import MongoClient
 
 from adapters.factory.adapter_config import (
     MetricAdapterType,
@@ -117,14 +117,14 @@ class InitOperator(BaseOperator):
     def __init__(
         self,
         config_path: str,
-        mongo_conn_id: str = "mongo_checkpoint",
+        checkpoint_conn_id: str = "postgres_checkpoint",
         openbao_conn_id: str = OpenBaoHook.default_conn_name,
         xcom_key: str = "run_context",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.config_path = config_path
-        self.mongo_conn_id = mongo_conn_id
+        self.checkpoint_conn_id = checkpoint_conn_id
         self.openbao_conn_id = openbao_conn_id
         self.xcom_key = xcom_key
 
@@ -199,7 +199,7 @@ class InitOperator(BaseOperator):
             log.info("[InitOperator] No metric credential_ref configured — skipping")
 
         # ── 7. Fetch checkpoint_from from MongoDB ─────────────────────────
-        checkpoint_from: Optional[CheckpointValue] = self._fetch_checkpoint_from(dag_id)
+        checkpoint_from: Optional[CheckpointValue] = self._fetch_checkpoint_from(dag_id, self.checkpoint_conn_id)
         log.info(
             "[InitOperator] checkpoint_from=%s (None = full read)",
             checkpoint_from,
@@ -233,6 +233,7 @@ class InitOperator(BaseOperator):
             metric_config_raw=metric_cfg_raw,
             checkpoint_from=checkpoint_from,
             checkpoint_to=checkpoint_to,
+            count_records=bool(cfg.get("count_records", False)),
         )
 
         serialised = run_context.to_dict()
@@ -248,28 +249,30 @@ class InitOperator(BaseOperator):
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
 
-    def _fetch_checkpoint_from(self, dag_id: str) -> Optional[CheckpointValue]:
+    @staticmethod
+    def _fetch_checkpoint_from(dag_id: str, checkpoint_conn_id: str) -> Optional[CheckpointValue]:
         """
-        Fetch the last successful checkpoint value from MongoDB.
-        The checkpoint document is keyed by dag_id in the
-        'checkpoints' collection of the config database.
-        Returns None if no record exists (triggers full read).
+        Fetch the last successful checkpoint value from the PostgreSQL checkpoints table.
+        Keyed by dag_id. Returns None if no record exists (triggers full read).
         """
-        mongo_conn = BaseHook.get_connection(self.mongo_conn_id)
-        client = MongoClient(
-            host=mongo_conn.host,
-            port=mongo_conn.port,
-            username=mongo_conn.login,
-            password=mongo_conn.password,
+        conn_cfg = BaseHook.get_connection(checkpoint_conn_id)
+        conn = psycopg2.connect(
+            host=conn_cfg.host,
+            port=conn_cfg.port or 5432,
+            dbname=conn_cfg.schema,
+            user=conn_cfg.login,
+            password=conn_cfg.password,
         )
         try:
-            db = client[mongo_conn.schema or "config"]
-            doc = db["checkpoints"].find_one({"dag_id": dag_id})
-            if not doc:
-                return None
-            return _parse_checkpoint(doc["checkpoint_to"])
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT checkpoint_to FROM public.checkpoints WHERE dag_id = %s",
+                    (dag_id,),
+                )
+                row = cur.fetchone()
+                return _parse_checkpoint(row[0]) if row else None
         finally:
-            client.close()
+            conn.close()
 
     @staticmethod
     def _fetch_checkpoint_to(

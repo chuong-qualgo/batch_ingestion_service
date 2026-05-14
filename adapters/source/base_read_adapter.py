@@ -20,6 +20,11 @@ class SourceConfig:
     """
     credential_ref: str          # OpenBao key — fetches host, port, and credentials
     extra: dict = field(default_factory=dict)
+    read_options: dict = field(default_factory=dict)
+    # read_options are passed verbatim to spark.read.option(k, v).
+    # SQL/JDBC: numPartitions, partitionColumn, lowerBound, upperBound,
+    #           fetchsize, isolationLevel, sessionInitStatement, queryTimeout
+    # File:     mergeSchema, recursiveFileLookup, header, inferSchema, etc.
 
 
 @dataclass

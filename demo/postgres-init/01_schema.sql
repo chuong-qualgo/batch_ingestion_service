@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS public.orders (
 -- Index on checkpoint column for efficient incremental reads
 CREATE INDEX IF NOT EXISTS idx_orders_updated_at ON public.orders (updated_at);
 
+-- =============================================================================
+-- Pipeline checkpoint store
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS public.checkpoints (
+    dag_id        TEXT PRIMARY KEY,
+    checkpoint_to TEXT        NOT NULL,
+    updated_at    TIMESTAMP   NOT NULL DEFAULT NOW()
+);
+
 -- Trigger: keep updated_at current on every row update
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

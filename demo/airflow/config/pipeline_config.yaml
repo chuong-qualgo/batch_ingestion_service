@@ -2,9 +2,10 @@
 # Demo pipeline config — PostgreSQL orders → HDFS landing zone
 # =============================================================================
 
-read_type:   sql
-write_type:  hadoop
-metric_type: onprem_queue
+read_type:    sql
+write_type:   hadoop
+metric_type:  kafka_queue
+count_records: false    # set true to count rows (costs extra Spark scan / memory)
 
 source:
   credential_ref: data-processor/postgres
@@ -12,13 +13,32 @@ source:
   schema: public
   table: orders
   checkpoint_column: updated_at        # enables incremental reads on reruns
+  # read_options are passed verbatim to spark.read.option(k, v)
+  # Uncomment to enable parallel partitioned reads (all 4 required together):
+  # read_options:
+  #   numPartitions: 8
+  #   partitionColumn: id          # must be numeric, date, or timestamp
+  #   lowerBound: 1
+  #   upperBound: 1000000
+  #   fetchsize: 10000             # overrides batch_size; rows per DB round-trip
+  #   isolationLevel: READ_UNCOMMITTED   # avoids read locks on analytics workloads
+  #   sessionInitStatement: "SET work_mem TO '256MB'"
 
 sink:
   credential_ref: data-platform/hadoop
   source_system_name: postgres-demo    # appears in the HDFS output path
 
 metric:
-  credential_ref: data-platform/redis
-  stream_name: pipeline-metrics
-  max_len: 1000
+  credential_ref: data-platform/kafka
+  topic: pipeline-metrics
+  key: batch-ingestion
+
+spark:
+  spark.master: spark://spark-master:7077
+  spark.sql.shuffle.partitions: "4"
+  spark.executor.memory: 1g
+  spark.driver.memory: 2g
+  spark.driver.maxResultSize: 2g
+  spark.network.timeout: 600s
+  spark.executor.heartbeatInterval: 60s
 

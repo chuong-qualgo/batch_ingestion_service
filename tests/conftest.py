@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from adapters.source.base_read_adapter import TableSourceConfig, PathSourceConfig
 from adapters.write.base_write_adapter import SinkConfig
-from adapters.metric.base_metric_adapter import RedisMetricConfig, SQSMetricConfig
+from adapters.metric.base_metric_adapter import RedisMetricConfig, SQSMetricConfig, KafkaMetricConfig
 
 
 # ── Source configs ────────────────────────────────────────────────────────
@@ -110,6 +110,25 @@ def redis_metric_config():
         port=6379,
         stream_name="pipeline-metrics",
         max_len=1000,
+    )
+
+
+@pytest.fixture
+def kafka_credentials():
+    return {
+        "bootstrap_servers": "broker1:9092,broker2:9092",
+        "sasl_username": "metrics-user",
+        "sasl_password": "metrics-pass",
+    }
+
+
+@pytest.fixture
+def kafka_metric_config():
+    return KafkaMetricConfig(
+        credential_ref="data-platform/kafka",
+        bootstrap_servers="broker1:9092,broker2:9092",
+        topic="pipeline-metrics",
+        key="batch-ingestion",
     )
 
 

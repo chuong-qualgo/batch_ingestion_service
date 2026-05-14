@@ -36,5 +36,8 @@ mongomock==4.1.2        # 4.1.x — last version compatible with pymongo 4.x
 # ── Cassandra driver (mocked in tests — import only) ─────────────────────────
 cassandra-driver==3.29.2
 
+# ── Kafka ─────────────────────────────────────────────────────────────────────
+kafka-python==2.0.2     # 2.0.x — last stable release, Python 3.11 compatible
+
 # ── YAML ─────────────────────────────────────────────────────────────────────
 PyYAML==6.0.2

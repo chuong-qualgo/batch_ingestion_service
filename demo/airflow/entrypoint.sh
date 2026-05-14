@@ -22,14 +22,14 @@ if [ ! -f /tmp/airflow-init.done ]; then
       --conn-port 8200 \
       --conn-schema demo || true
 
-    echo "[Airflow Init] Registering MongoDB connection..."
-    airflow connections add mongo_checkpoint \
-      --conn-type generic \
-      --conn-host mongo \
-      --conn-port 27017 \
-      --conn-login mongo_user \
-      --conn-password mongo_pass \
-      --conn-schema config || true
+    echo "[Airflow Init] Registering PostgreSQL checkpoint connection..."
+    airflow connections add postgres_checkpoint \
+      --conn-type postgres \
+      --conn-host postgres \
+      --conn-port 5432 \
+      --conn-login orders_user \
+      --conn-password orders_pass \
+      --conn-schema orders_db || true
 
     echo "[Airflow Init] Initialization complete"
     touch /tmp/airflow-init.done

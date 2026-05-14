@@ -23,6 +23,7 @@ class WriteAdapterType(str, Enum):
 class MetricAdapterType(str, Enum):
     CLOUD_QUEUE  = "cloud_queue"
     ONPREM_QUEUE = "onprem_queue"
+    KAFKA_QUEUE  = "kafka_queue"
 
 
 @dataclass
