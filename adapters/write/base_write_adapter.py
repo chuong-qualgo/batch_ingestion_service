@@ -71,6 +71,7 @@ class SinkConfig:
     run_id: str
     source_config: Union[TableSourceConfig, PathSourceConfig]
     extra: dict = field(default_factory=dict)
+    file_format: str = "parquet"   # parquet | json | csv | avro | orc | delta | text
 
 
 # ── Base adapter ──────────────────────────────────────────────────────────
@@ -169,6 +170,17 @@ class BaseWriteAdapter(ABC):
         return scheme + str(full_path)
 
     # ── Abstract actions ──────────────────────────────────────────────────
+
+    def copy_from(self, source_path: str, dest_path: str) -> None:
+        """
+        Copy files from source_path to dest_path without loading into Spark memory.
+        Used when both source and sink are file-based (FILE or S3 read type).
+        Override in subclasses that support filesystem-level copy.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support file copy. "
+            "Implement copy_from() or use write(df) instead."
+        )
 
     @abstractmethod
     def write(self, df: DataFrame) -> None:

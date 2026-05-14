@@ -45,4 +45,5 @@ class WriteAdapterFactory:
             spark=spark,
             sink_config=sink_config,
             credentials=credentials,
+            file_format=sink_config.file_format,
         )

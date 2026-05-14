@@ -99,6 +99,34 @@ class HadoopAdapter(BaseWriteAdapter):
             self.on_error(exc)
             raise
 
+    def copy_from(self, source_path: str, dest_path: str) -> None:
+        """
+        Copy files from source_path to dest_path using Hadoop FileSystem API.
+        Data streams at the filesystem layer — nothing is loaded into Spark memory.
+        Handles same-FS (HDFS→HDFS) and cross-FS (HDFS→S3A, S3A→HDFS) copies
+        as long as both filesystems are configured on the SparkContext.
+        """
+        try:
+            self._configure_spark_for_filesystem()
+            jvm = self.spark.sparkContext._jvm
+            conf = self.spark.sparkContext._jsc.hadoopConfiguration()
+            FileUtil = jvm.org.apache.hadoop.fs.FileUtil
+            src = jvm.org.apache.hadoop.fs.Path(source_path)
+            dst = jvm.org.apache.hadoop.fs.Path(dest_path)
+            ok = FileUtil.copy(
+                src.getFileSystem(conf), src,
+                dst.getFileSystem(conf), dst,
+                False,  # deleteSource
+                True,   # overwrite
+                conf,
+            )
+            if not ok:
+                raise RuntimeError(f"Hadoop FileUtil.copy returned false: {source_path} → {dest_path}")
+            self.post_write()
+        except Exception as exc:
+            self.on_error(exc)
+            raise
+
     def validate_connection(self) -> bool:
         """
         Validate access to the sink root path using Spark's Hadoop FileSystem API.

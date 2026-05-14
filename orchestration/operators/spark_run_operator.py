@@ -8,6 +8,7 @@ from airflow.models import BaseOperator
 from airflow.utils.context import Context
 
 from adapters.factory.adapter_config import AdapterConfig, MetricAdapterType
+from adapters.source.base_read_adapter import PathSourceConfig
 from orchestration.operators.metric_operator import push_metric_inline
 from orchestration.operators.run_context import RunContext
 from orchestration.plugins.openbao_hook import OpenBaoHook
@@ -163,42 +164,54 @@ class SparkRunOperator(BaseOperator):
             sink_adapter.validate_connection()
             log.info("[SparkRunOperator] Sink connection OK")
 
-            # ── 7. Apply source filters ───────────────────────────────────
-            source_adapter.apply_filters()
+            # ── 7. File source: copy directly, skip Spark read ────────────
+            if isinstance(run_ctx.source_config, PathSourceConfig):
+                source_path = run_ctx.source_config.path
+                dest_path = sink_adapter.build_write_path()
+                log.info(
+                    "[SparkRunOperator] File source detected — copying %s → %s",
+                    source_path, dest_path,
+                )
+                sink_adapter.copy_from(source_path, dest_path)
+                log.info("[SparkRunOperator] File copy complete")
 
-            # ── 8. Read from source ───────────────────────────────────────
-            log.info("[SparkRunOperator] Reading from source...")
-            df = source_adapter.read()
-            log.info(
-                "[SparkRunOperator] Read complete — checkpoint_from=%s checkpoint_to=%s",
-                run_ctx.checkpoint_from,
-                run_ctx.checkpoint_to,
-            )
-
-            # ── 8b. Count records (optional) ──────────────────────────────
-            if run_ctx.count_records:
-                df.cache()
-                record_count: int = df.count()
-                log.info("[SparkRunOperator] record_count=%d", record_count)
-                if record_count > _LARGE_COUNT_THRESHOLD:
-                    log.warning(
-                        "[SparkRunOperator] Large dataset: %d rows exceed threshold %d. "
-                        "df.cache() is holding this in executor memory until write completes. "
-                        "Increase spark.executor.memory or spark.memory.fraction if you see "
-                        "OOM / excessive GC.",
-                        record_count, _LARGE_COUNT_THRESHOLD,
-                    )
-                context["ti"].xcom_push(key="record_count", value=record_count)
             else:
-                log.info("[SparkRunOperator] record counting disabled (count_records: false)")
+                # ── 7. Apply source filters ───────────────────────────────
+                source_adapter.apply_filters()
 
-            # ── 9. Write to sink ──────────────────────────────────────────
-            write_path = sink_adapter.build_write_path()
-            log.info("[SparkRunOperator] Writing to sink — path=%s", write_path)
-            sink_adapter.write(df)
-            if run_ctx.count_records:
-                df.unpersist()
-            log.info("[SparkRunOperator] Write complete")
+                # ── 8. Read from source ───────────────────────────────────
+                log.info("[SparkRunOperator] Reading from source...")
+                df = source_adapter.read()
+                log.info(
+                    "[SparkRunOperator] Read complete — checkpoint_from=%s checkpoint_to=%s",
+                    run_ctx.checkpoint_from,
+                    run_ctx.checkpoint_to,
+                )
+
+                # ── 8b. Count records (optional) ──────────────────────────
+                if run_ctx.count_records:
+                    df.cache()
+                    record_count: int = df.count()
+                    log.info("[SparkRunOperator] record_count=%d", record_count)
+                    if record_count > _LARGE_COUNT_THRESHOLD:
+                        log.warning(
+                            "[SparkRunOperator] Large dataset: %d rows exceed threshold %d. "
+                            "df.cache() is holding this in executor memory until write completes. "
+                            "Increase spark.executor.memory or spark.memory.fraction if you see "
+                            "OOM / excessive GC.",
+                            record_count, _LARGE_COUNT_THRESHOLD,
+                        )
+                    context["ti"].xcom_push(key="record_count", value=record_count)
+                else:
+                    log.info("[SparkRunOperator] record counting disabled (count_records: false)")
+
+                # ── 9. Write to sink ──────────────────────────────────────
+                write_path = sink_adapter.build_write_path()
+                log.info("[SparkRunOperator] Writing to sink — path=%s", write_path)
+                sink_adapter.write(df)
+                if run_ctx.count_records:
+                    df.unpersist()
+                log.info("[SparkRunOperator] Write complete")
 
             # checkpoint_to persistence is handled by MetricPushOperator
             log.info("[SparkRunOperator] Pipeline complete — checkpoint will be saved by MetricPushOperator")

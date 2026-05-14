@@ -164,6 +164,7 @@ class InitOperator(BaseOperator):
             ingestion_time=ingestion_time,
             run_id=run_id,
             extra=sink_cfg_raw.get("extra", {}),
+            file_format=sink_cfg_raw.get("file_format", "parquet"),
         )
         log.info("[InitOperator] SinkConfig built — endpoint will be injected from OpenBao")
 

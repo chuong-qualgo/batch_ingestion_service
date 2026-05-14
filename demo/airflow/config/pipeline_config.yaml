@@ -27,6 +27,7 @@ source:
 sink:
   credential_ref: data-platform/hadoop
   source_system_name: postgres-demo    # appears in the HDFS output path
+  file_format: parquet                 # parquet | json | csv | avro | orc | delta | text
 
 metric:
   credential_ref: data-platform/kafka

@@ -44,6 +44,7 @@ class SinkConfigFactory:
         ingestion_time: datetime,
         run_id: str,
         extra: dict = None,
+        file_format: str = "parquet",
     ) -> SinkConfig:
         """
         Build and return a SinkConfig without an endpoint.
@@ -67,6 +68,7 @@ class SinkConfigFactory:
             ingestion_time=ingestion_time,
             run_id=run_id,
             extra=extra or {},
+            file_format=file_format,
         )
 
     @staticmethod
