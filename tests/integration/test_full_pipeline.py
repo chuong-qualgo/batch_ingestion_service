@@ -205,7 +205,7 @@ def make_init(config_path, metric_type="onprem_queue"):
     return InitOperator(
         task_id="init",
         config_path=config_path,
-        mongo_conn_id="mongo_checkpoint",
+        checkpoint_conn_id="postgres_checkpoint",
         openbao_conn_id="openbao_default",
     )
 
@@ -318,7 +318,7 @@ class TestInitToSparkHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -336,7 +336,7 @@ class TestInitToSparkHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -354,7 +354,7 @@ class TestInitToSparkHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -371,7 +371,7 @@ class TestInitToSparkHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -411,7 +411,7 @@ class TestInitToSparkHandoff:
                 spark_op = SparkRunOperator(
                     task_id="spark_run",
                     init_task_id="init",
-                    mongo_conn_id="mongo_checkpoint",
+                    checkpoint_conn_id="postgres_checkpoint",
                     metric_type=MetricAdapterType.ONPREM_QUEUE,
                     metric_config_raw=SQL_TO_HADOOP_CFG["metric"],
                 )
@@ -438,7 +438,7 @@ class TestInitToSparkHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -464,7 +464,7 @@ class TestSparkToMetricHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -519,7 +519,7 @@ class TestSparkToMetricHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 
@@ -563,7 +563,7 @@ class TestSparkToMetricHandoff:
         spark_op = SparkRunOperator(
             task_id="spark_run",
             init_task_id="init",
-            mongo_conn_id="mongo_checkpoint",
+            checkpoint_conn_id="postgres_checkpoint",
         )
         spark_op.execute(airflow_context)
 

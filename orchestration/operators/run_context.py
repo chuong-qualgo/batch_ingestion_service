@@ -10,7 +10,7 @@ from adapters.factory.adapter_config import (
     ReadAdapterType,
     WriteAdapterType,
 )
-from adapters.source.base_read_adapter import CheckpointValue, PathSourceConfig, TableSourceConfig
+from adapters.source.base_read_adapter import CheckpointValue, KafkaSourceConfig, PathSourceConfig, TableSourceConfig
 
 
 def _serialise_checkpoint(val: Optional[CheckpointValue]) -> Optional[dict]:
@@ -18,6 +18,8 @@ def _serialise_checkpoint(val: Optional[CheckpointValue]) -> Optional[dict]:
         return None
     if isinstance(val, datetime):
         return {"t": "ts", "v": val.isoformat()}
+    if isinstance(val, str):
+        return {"t": "str", "v": val}
     return {"t": "int", "v": val}
 
 
@@ -28,6 +30,8 @@ def _deserialise_checkpoint(raw) -> Optional[CheckpointValue]:
         return datetime.fromisoformat(raw["v"])
     if raw.get("t") == "int":
         return int(raw["v"])
+    if raw.get("t") == "str":
+        return str(raw["v"])
     return None
 from adapters.write.base_write_adapter import SinkConfig
 
@@ -54,7 +58,7 @@ class RunContext:
         Which sink adapter to instantiate in SparkRunOperator.
     metric_type : MetricAdapterType
         Which metric adapter to instantiate in SparkRunOperator.
-    source_config : TableSourceConfig | PathSourceConfig
+    source_config : TableSourceConfig | PathSourceConfig | KafkaSourceConfig
         Fully built source config (constructed by InitOperator).
     sink_config : SinkConfig
         Fully built sink config with ingestion partitions (constructed by InitOperator).
@@ -83,7 +87,7 @@ class RunContext:
     read_type: ReadAdapterType
     write_type: WriteAdapterType
     metric_type: MetricAdapterType
-    source_config: Union[TableSourceConfig, PathSourceConfig]
+    source_config: Union[TableSourceConfig, PathSourceConfig, KafkaSourceConfig]
     sink_config: SinkConfig
     source_credentials: dict
     sink_credentials: dict

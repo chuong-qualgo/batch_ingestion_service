@@ -44,13 +44,17 @@ def _parse_checkpoint(val) -> Optional["CheckpointValue"]:
             return int(val)
     except ImportError:
         pass
-    # String fallback — try int, then ISO datetime
+    # String fallback — try int, then ISO datetime, then raw string (e.g. Kafka offset JSON)
     s = str(val).strip()
     try:
         return int(s)
     except ValueError:
         pass
-    return datetime.fromisoformat(s)
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    return s
 
 
 class InitOperator(BaseOperator):
@@ -77,8 +81,8 @@ class InitOperator(BaseOperator):
         Absolute path to the YAML pipeline config file.
         The file must contain `source`, `sink`, `read_type`, `write_type`,
         and `metric_type` sections. See config/settings.py for schema.
-    mongo_conn_id : str
-        Airflow connection id for the MongoDB checkpoint store.
+    checkpoint_conn_id : str
+        Airflow connection id for the PostgreSQL checkpoint store.
     openbao_conn_id : str
         Airflow connection id for OpenBao. Defaults to 'openbao_default'.
     xcom_key : str
@@ -297,6 +301,16 @@ class InitOperator(BaseOperator):
         """
         from adapters.factory.adapter_config import ReadAdapterType as RAT
 
+        # Kafka: checkpoint is epoch ms — no checkpoint_column concept
+        if read_type == RAT.KAFKA:
+            try:
+                return InitOperator._max_kafka(source_config, source_credentials)
+            except Exception as exc:
+                log.warning(
+                    "[InitOperator] Could not capture Kafka checkpoint_to: %s — proceeding without upper bound", exc
+                )
+                return None
+
         checkpoint_col = getattr(source_config, "checkpoint_column", None)
         if not checkpoint_col:
             return None
@@ -463,3 +477,61 @@ class InitOperator(BaseOperator):
             raw = result.stdout.strip().split("\n")[-1]
             return _parse_checkpoint(raw)
         return None
+
+    @staticmethod
+    def _max_kafka(source_config, credentials: dict) -> str:
+        """
+        Fetch the current end offsets from every partition of the Kafka topic and
+        return them as a Spark JSON offset string, e.g.:
+            '{"orders-events": {"0": 1000, "1": 2000, "2": 1500}}'
+
+        This string is stored verbatim as checkpoint_to in PostgreSQL (TEXT column)
+        and on the next run becomes checkpoint_from, which SourceKafkaAdapter passes
+        directly to the startingOffsets Spark option — giving a deterministic,
+        gapless batch window.
+
+        Raises on broker connectivity failure so _fetch_checkpoint_to can log and
+        fall back to None (Spark will then use endingOffsets="latest").
+        """
+        import json
+        from kafka import KafkaConsumer, TopicPartition
+
+        bootstrap_servers = source_config.bootstrap_servers.split(",")
+        topics = [t.strip() for t in source_config.topic.split(",")]
+
+        consumer_kwargs: dict = {
+            "bootstrap_servers": bootstrap_servers,
+            "group_id": source_config.group_id or None,
+            "enable_auto_commit": False,
+        }
+
+        sasl_username = credentials.get("sasl_username")
+        sasl_password = credentials.get("sasl_password")
+        if sasl_username and sasl_password:
+            consumer_kwargs.update({
+                "security_protocol": "SASL_PLAINTEXT",
+                "sasl_mechanism": "PLAIN",
+                "sasl_plain_username": sasl_username,
+                "sasl_plain_password": sasl_password,
+            })
+
+        consumer = KafkaConsumer(**consumer_kwargs)
+        try:
+            tps = []
+            for topic in topics:
+                partitions = consumer.partitions_for_topic(topic) or set()
+                tps.extend(TopicPartition(topic, p) for p in sorted(partitions))
+
+            if not tps:
+                raise RuntimeError(f"No partitions found for topics: {topics}")
+
+            end_offsets = consumer.end_offsets(tps)
+
+            # Build Spark JSON offset map: {"topic": {"partition_str": end_offset}}
+            offset_map: dict = {}
+            for tp, offset in end_offsets.items():
+                offset_map.setdefault(tp.topic, {})[str(tp.partition)] = offset
+
+            return json.dumps(offset_map, sort_keys=True)
+        finally:
+            consumer.close()

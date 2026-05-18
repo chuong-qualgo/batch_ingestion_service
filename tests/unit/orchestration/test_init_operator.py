@@ -79,7 +79,7 @@ def operator(yaml_config_file):
     return InitOperator(
         task_id="init",
         config_path=yaml_config_file,
-        mongo_conn_id="mongo_checkpoint",
+        checkpoint_conn_id="postgres_checkpoint",
         openbao_conn_id="openbao_default",
     )
 
@@ -523,170 +523,150 @@ def test_run_context_from_dict_defaults_empty_metric(table_source_config, sink_c
     assert restored.metric_config_raw == {}
 
 
-# ── _fetch_checkpoint_from (MongoDB) ─────────────────────────────────────
+# ── _fetch_checkpoint_from (PostgreSQL) ──────────────────────────────────
 
 class TestFetchCheckpointFromMongo:
-    def _make_mock_conn(self, schema="config"):
+    """Tests for InitOperator._fetch_checkpoint_from (PostgreSQL implementation)."""
+
+    def _make_mock_conn_cfg(self, port=5432):
         conn = MagicMock()
-        conn.host = "mongo-host"
-        conn.port = 27017
-        conn.login = "mongo_user"
-        conn.password = "mongo_pass"
-        conn.schema = schema
+        conn.host = "pg-host"
+        conn.port = port
+        conn.login = "pg_user"
+        conn.password = "pg_pass"
+        conn.schema = "checkpoints_db"
         return conn
 
-    def test_returns_int_checkpoint_from_doc(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
-        mock_collection.find_one.return_value = {"dag_id": "test_dag", "checkpoint_to": 999}
+    def _make_mock_pg(self, fetchone_return):
+        mock_conn = MagicMock()
+        cur = mock_conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = fetchone_return
+        return mock_conn, cur
 
+    def test_returns_int_checkpoint_from_doc(self):
+        mock_pg, cur = self._make_mock_pg(fetchone_return=("999",))
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
-            result = operator._fetch_checkpoint_from("test_dag")
-
+            result = InitOperator._fetch_checkpoint_from("test_dag", "postgres_checkpoint")
         assert result == 999
 
-    def test_returns_datetime_checkpoint_from_doc(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+    def test_returns_datetime_checkpoint_from_doc(self):
         dt = datetime(2024, 3, 31, 23, 59, 59)
-        mock_collection.find_one.return_value = {"dag_id": "test_dag", "checkpoint_to": dt}
-
+        mock_pg, cur = self._make_mock_pg(fetchone_return=(dt.isoformat(),))
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
-            result = operator._fetch_checkpoint_from("test_dag")
-
+            result = InitOperator._fetch_checkpoint_from("test_dag", "postgres_checkpoint")
         assert result == dt
 
-    def test_returns_none_when_no_document(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
-        mock_collection.find_one.return_value = None
-
+    def test_returns_none_when_no_document(self):
+        mock_pg, cur = self._make_mock_pg(fetchone_return=None)
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
-            result = operator._fetch_checkpoint_from("test_dag")
-
+            result = InitOperator._fetch_checkpoint_from("test_dag", "postgres_checkpoint")
         assert result is None
 
-    def test_queries_by_dag_id(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
-        mock_collection.find_one.return_value = None
-
+    def test_queries_by_dag_id(self):
+        mock_pg, cur = self._make_mock_pg(fetchone_return=None)
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
-            operator._fetch_checkpoint_from("my_dag")
+            InitOperator._fetch_checkpoint_from("my_dag", "postgres_checkpoint")
 
-        mock_collection.find_one.assert_called_once_with({"dag_id": "my_dag"})
+        sql_call = cur.execute.call_args[0]
+        assert "dag_id" in sql_call[0]
+        assert sql_call[1] == ("my_dag",)
 
-    def test_uses_conn_schema_as_database(self, operator):
-        mock_conn = self._make_mock_conn(schema="pipeline_config")
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
-
+    def test_uses_conn_schema_as_database(self):
+        conn_cfg = self._make_mock_conn_cfg()
+        conn_cfg.schema = "pipeline_config"
+        mock_pg, _ = self._make_mock_pg(fetchone_return=None)
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=conn_cfg,
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
+        ) as mock_connect:
+            InitOperator._fetch_checkpoint_from("dag", "postgres_checkpoint")
+
+        assert mock_connect.call_args[1]["dbname"] == "pipeline_config"
+
+    def test_defaults_port_to_5432_when_zero(self):
+        mock_pg, _ = self._make_mock_pg(fetchone_return=None)
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=self._make_mock_conn_cfg(port=0),
+        ), patch(
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
+        ) as mock_connect:
+            InitOperator._fetch_checkpoint_from("dag", "postgres_checkpoint")
+
+        assert mock_connect.call_args[1]["port"] == 5432
+
+    def test_client_closed_after_query(self):
+        mock_pg, _ = self._make_mock_pg(fetchone_return=None)
+        with patch(
+            "orchestration.operators.init_operator.BaseHook.get_connection",
+            return_value=self._make_mock_conn_cfg(),
+        ), patch(
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
-            operator._fetch_checkpoint_from("dag")
+            InitOperator._fetch_checkpoint_from("dag", "postgres_checkpoint")
 
-        mock_mongo.__getitem__.assert_called_once_with("pipeline_config")
+        mock_pg.close.assert_called_once()
 
-    def test_defaults_to_config_database_when_schema_empty(self, operator):
-        mock_conn = self._make_mock_conn(schema=None)
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
-
+    def test_client_closed_even_on_error(self):
+        mock_pg = MagicMock()
+        mock_pg.cursor.return_value.__enter__.return_value.execute.side_effect = RuntimeError("db error")
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
-        ):
-            operator._fetch_checkpoint_from("dag")
-
-        mock_mongo.__getitem__.assert_called_once_with("config")
-
-    def test_client_closed_after_query(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
-
-        with patch(
-            "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
-        ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
-        ):
-            operator._fetch_checkpoint_from("dag")
-
-        mock_mongo.close.assert_called_once()
-
-    def test_client_closed_even_on_error(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.side_effect = RuntimeError("db error")
-
-        with patch(
-            "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
-        ), patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
         ):
             with pytest.raises(RuntimeError):
-                operator._fetch_checkpoint_from("dag")
+                InitOperator._fetch_checkpoint_from("dag", "postgres_checkpoint")
 
-        mock_mongo.close.assert_called_once()
+        mock_pg.close.assert_called_once()
 
-    def test_connects_with_airflow_connection_params(self, operator):
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.find_one.return_value = None
-
+    def test_connects_with_airflow_connection_params(self):
+        mock_pg, _ = self._make_mock_pg(fetchone_return=None)
         with patch(
             "orchestration.operators.init_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=self._make_mock_conn_cfg(),
         ) as mock_get_conn, patch(
-            "orchestration.operators.init_operator.MongoClient",
-            return_value=mock_mongo,
-        ) as mock_client_cls:
-            operator._fetch_checkpoint_from("dag")
+            "orchestration.operators.init_operator.psycopg2.connect",
+            return_value=mock_pg,
+        ) as mock_connect:
+            InitOperator._fetch_checkpoint_from("dag", "postgres_checkpoint")
 
-        mock_get_conn.assert_called_once_with("mongo_checkpoint")
-        mock_client_cls.assert_called_once_with(
-            host="mongo-host",
-            port=27017,
-            username="mongo_user",
-            password="mongo_pass",
+        mock_get_conn.assert_called_once_with("postgres_checkpoint")
+        mock_connect.assert_called_once_with(
+            host="pg-host",
+            port=5432,
+            dbname="checkpoints_db",
+            user="pg_user",
+            password="pg_pass",
         )

@@ -1,5 +1,6 @@
 from adapters.factory.adapter_config import ReadAdapterType
 from adapters.source.base_read_adapter import (
+    KafkaSourceConfig,
     PathSourceConfig,
     SourceConfig,
     TableSourceConfig,
@@ -58,6 +59,10 @@ class SourceConfigFactory:
         ReadAdapterType.S3,
     }
 
+    _KAFKA_TYPES = {
+        ReadAdapterType.KAFKA,
+    }
+
     @classmethod
     def create(
         cls,
@@ -67,18 +72,21 @@ class SourceConfigFactory:
     ) -> SourceConfig:
         """
         Build and return the appropriate SourceConfig subclass.
-        Connection details (host/port/path) are expected to be injected
-        later via inject_connection().
+        Connection details (host/port/path/bootstrap_servers) are expected to be
+        injected later via inject_connection().
         """
         if adapter_type in cls._TABLE_TYPES:
             return cls._build_table_config(credential_ref, **kwargs)
         elif adapter_type in cls._PATH_TYPES:
             return cls._build_path_config(credential_ref, **kwargs)
+        elif adapter_type in cls._KAFKA_TYPES:
+            return cls._build_kafka_config(credential_ref, **kwargs)
         else:
             raise TypeError(
                 f"No SourceConfig mapping for adapter type: '{adapter_type}'. "
                 f"Table types: {[t.value for t in cls._TABLE_TYPES]}, "
-                f"Path types: {[t.value for t in cls._PATH_TYPES]}"
+                f"Path types: {[t.value for t in cls._PATH_TYPES]}, "
+                f"Kafka types: {[t.value for t in cls._KAFKA_TYPES]}"
             )
 
     @staticmethod
@@ -111,6 +119,10 @@ class SourceConfigFactory:
         elif isinstance(config, PathSourceConfig):
             if "path" in credentials:
                 config.path = credentials["path"]
+
+        elif isinstance(config, KafkaSourceConfig):
+            if "bootstrap_servers" in credentials:
+                config.bootstrap_servers = credentials["bootstrap_servers"]
 
     @classmethod
     def _build_table_config(
@@ -152,6 +164,29 @@ class SourceConfigFactory:
             credential_ref=credential_ref,
             file_format=file_format,
             checkpoint_column=checkpoint_column,
+            extra=extra or {},
+            read_options=read_options or {},
+        )
+
+    @classmethod
+    def _build_kafka_config(
+        cls,
+        credential_ref: str,
+        topic: str = "",
+        group_id: str = "",
+        starting_offsets: str = "earliest",
+        value_format: str = "json",
+        extra: dict = None,
+        read_options: dict = None,
+        **_ignored,
+    ) -> KafkaSourceConfig:
+        cls._require(topic=topic)
+        return KafkaSourceConfig(
+            credential_ref=credential_ref,
+            topic=topic,
+            group_id=group_id,
+            starting_offsets=starting_offsets,
+            value_format=value_format,
             extra=extra or {},
             read_options=read_options or {},
         )

@@ -144,17 +144,15 @@ class MetricPushOperator(BaseOperator):
     ---------------
     1. Pull RunContext from XCom (written by InitOperator).
     2. Publish metric message to the configured queue (Redis or SQS).
-    3. Upsert checkpoint_to into MongoDB keyed by dag_id.
+    3. Upsert checkpoint_to into PostgreSQL keyed by dag_id.
        Step 3 is skipped if checkpoint_to is None (no checkpoint_column
-       configured) or if mongo_conn_id is not set.
+       configured) or if checkpoint_conn_id is not set.
 
-    MongoDB document structure (collection: checkpoints)
-    ----------------------------------------------------
-    {
-        "dag_id":          "<dag_id>",          # lookup key
-        "checkpoint_from": "<checkpoint_to>",   # becomes next run's checkpoint_from
-        "updated_at":      "<ISO timestamp>"
-    }
+    PostgreSQL table structure (public.checkpoints)
+    ------------------------------------------------
+    dag_id        TEXT PRIMARY KEY,
+    checkpoint_to TEXT,
+    updated_at    TIMESTAMPTZ
 
     Parameters
     ----------
@@ -168,9 +166,9 @@ class MetricPushOperator(BaseOperator):
         Pipeline status written into the metric payload. Defaults to 'success'.
     extra_payload : dict, optional
         Additional fields merged into the published metric payload.
-    mongo_conn_id : str, optional
-        Airflow connection id for the MongoDB checkpoint store.
-        Matches the mongo_conn_id used by InitOperator to read checkpoints.
+    checkpoint_conn_id : str, optional
+        Airflow connection id for the PostgreSQL checkpoint store.
+        Matches the checkpoint_conn_id used by InitOperator to read checkpoints.
         When None, checkpoint save is skipped.
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.

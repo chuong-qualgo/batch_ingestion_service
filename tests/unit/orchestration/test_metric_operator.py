@@ -4,8 +4,8 @@ Unit tests for MetricPushOperator, push_metric_inline, and _build_metric_adapter
 All external I/O is mocked:
   - OpenBaoHook.get_secret
   - MetricAdapterFactory.create / adapter methods
-  - BaseHook.get_connection  (Airflow connection for MongoDB)
-  - MongoClient              (pymongo)
+  - BaseHook.get_connection  (Airflow connection for PostgreSQL checkpoint store)
+  - psycopg2.connect         (PostgreSQL)
   - Airflow context (dag, run_id, xcom)
 """
 import pytest
@@ -84,7 +84,7 @@ def mock_adapter():
     return adapter
 
 
-def _make_operator(metric_config=None, mongo_conn_id=None, status="success", extra_payload=None):
+def _make_operator(metric_config=None, checkpoint_conn_id=None, status="success", extra_payload=None):
     return MetricPushOperator(
         task_id="metric_push",
         init_task_id="init",
@@ -92,7 +92,7 @@ def _make_operator(metric_config=None, mongo_conn_id=None, status="success", ext
         metric_config_raw=metric_config or METRIC_CONFIG_REDIS,
         status=status,
         extra_payload=extra_payload,
-        mongo_conn_id=mongo_conn_id,
+        checkpoint_conn_id=checkpoint_conn_id,
     )
 
 
@@ -251,7 +251,7 @@ class TestMetricPushOperatorPayload:
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo"):
+        ), patch.object(op, "_save_checkpoint"):
             op.execute(airflow_context)
 
         published = mock_adapter.publish.call_args[0][0]
@@ -264,7 +264,7 @@ class TestMetricPushOperatorPayload:
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo"):
+        ), patch.object(op, "_save_checkpoint"):
             op.execute(airflow_context)
 
         published = mock_adapter.publish.call_args[0][0]
@@ -277,7 +277,7 @@ class TestMetricPushOperatorPayload:
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo"):
+        ), patch.object(op, "_save_checkpoint"):
             op.execute(airflow_context)
 
         published = mock_adapter.publish.call_args[0][0]
@@ -291,7 +291,7 @@ class TestMetricPushOperatorPayload:
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo"):
+        ), patch.object(op, "_save_checkpoint"):
             op.execute(airflow_context)
 
         assert mock_adapter.publish.call_args[0][0]["checkpoint_from"] is None
@@ -331,62 +331,62 @@ class TestMetricPushOperatorPayload:
 # ── MetricPushOperator.execute — checkpoint save ──────────────────────────────
 
 class TestMetricPushOperatorCheckpointSave:
-    def test_saves_checkpoint_when_mongo_conn_id_set(self, airflow_context, mock_adapter):
+    def test_saves_checkpoint_when_checkpoint_conn_id_set(self, airflow_context, mock_adapter):
         airflow_context["ti"].xcom_pull.return_value = RAW_CONTEXT_INT_CKPT
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
 
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo") as mock_save:
+        ), patch.object(op, "_save_checkpoint") as mock_save:
             op.execute(airflow_context)
 
         mock_save.assert_called_once_with("test_dag", "999")
 
-    def test_skips_checkpoint_when_mongo_conn_id_is_none(self, airflow_context, mock_adapter):
+    def test_skips_checkpoint_when_checkpoint_conn_id_is_none(self, airflow_context, mock_adapter):
         airflow_context["ti"].xcom_pull.return_value = RAW_CONTEXT_INT_CKPT
-        op = _make_operator(mongo_conn_id=None)
+        op = _make_operator(checkpoint_conn_id=None)
 
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo") as mock_save:
+        ), patch.object(op, "_save_checkpoint") as mock_save:
             op.execute(airflow_context)
 
         mock_save.assert_not_called()
 
     def test_skips_checkpoint_when_checkpoint_to_is_absent(self, airflow_context, mock_adapter):
         airflow_context["ti"].xcom_pull.return_value = RAW_CONTEXT_NO_CKPT
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
 
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo") as mock_save:
+        ), patch.object(op, "_save_checkpoint") as mock_save:
             op.execute(airflow_context)
 
         mock_save.assert_not_called()
 
     def test_skips_checkpoint_when_xcom_is_none(self, airflow_context, mock_adapter):
         airflow_context["ti"].xcom_pull.return_value = None
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
 
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo") as mock_save:
+        ), patch.object(op, "_save_checkpoint") as mock_save:
             op.execute(airflow_context)
 
         mock_save.assert_not_called()
 
     def test_saves_timestamp_checkpoint_as_string(self, airflow_context, mock_adapter):
         airflow_context["ti"].xcom_pull.return_value = RAW_CONTEXT_TS_CKPT
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
 
         with patch(
             "orchestration.operators.metric_operator._build_metric_adapter",
             return_value=mock_adapter,
-        ), patch.object(op, "_save_checkpoint_mongo") as mock_save:
+        ), patch.object(op, "_save_checkpoint") as mock_save:
             op.execute(airflow_context)
 
         mock_save.assert_called_once_with("test_dag", "2024-03-31T23:59:59")
@@ -411,128 +411,126 @@ class TestMetricPushOperatorCheckpointSave:
         )
 
 
-# ── _save_checkpoint_mongo ────────────────────────────────────────────────────
+# ── _save_checkpoint ──────────────────────────────────────────────────────────
 
-class TestSaveCheckpointMongo:
-    def _make_mock_conn(self, schema="config"):
+class TestSaveCheckpoint:
+    def _make_mock_conn_cfg(self, port=5432):
         conn = MagicMock()
-        conn.host = "mongo-host"
-        conn.port = 27017
-        conn.login = "mongo_user"
-        conn.password = "mongo_pass"
-        conn.schema = schema
+        conn.host = "pg-host"
+        conn.port = port
+        conn.login = "pg_user"
+        conn.password = "pg_pass"
+        conn.schema = "checkpoints_db"
         return conn
 
     def test_connects_with_airflow_connection_params(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn()
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg()
+        mock_conn = MagicMock()
 
         with patch(
             "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=mock_conn_cfg,
         ) as mock_get_conn, patch(
-            "orchestration.operators.metric_operator.MongoClient"
-        ) as mock_client_cls:
-            op._save_checkpoint_mongo("my_dag", "999")
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
+        ) as mock_connect:
+            op._save_checkpoint("my_dag", "999")
 
-        mock_get_conn.assert_called_once_with("mongo_checkpoint")
-        mock_client_cls.assert_called_once_with(
-            host="mongo-host",
-            port=27017,
-            username="mongo_user",
-            password="mongo_pass",
+        mock_get_conn.assert_called_once_with("postgres_checkpoint")
+        mock_connect.assert_called_once_with(
+            host="pg-host",
+            port=5432,
+            dbname="checkpoints_db",
+            user="pg_user",
+            password="pg_pass",
         )
 
-    def test_upserts_with_correct_filter_and_document(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn(schema="pipeline_config")
-        mock_mongo = MagicMock()
-        # client["pipeline_config"]["checkpoints"].replace_one(...)
-        mock_collection = mock_mongo.__getitem__.return_value.__getitem__.return_value
+    def test_executes_upsert_with_correct_params(self):
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg()
+        mock_conn = MagicMock()
 
         with patch(
             "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=mock_conn_cfg,
         ), patch(
-            "orchestration.operators.metric_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
         ):
-            op._save_checkpoint_mongo("my_dag", "999")
+            op._save_checkpoint("my_dag", "999")
 
-        mock_collection.replace_one.assert_called_once()
-        args = mock_collection.replace_one.call_args
-        filter_doc, replacement = args[0]
-        assert filter_doc == {"dag_id": "my_dag"}
-        assert replacement["dag_id"] == "my_dag"
-        assert replacement["checkpoint_to"] == "999"
-        assert "updated_at" in replacement
-        assert args[1]["upsert"] is True
+        mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "INSERT INTO public.checkpoints" in sql
+        assert "ON CONFLICT" in sql
+        assert params == ("my_dag", "999")
 
-    def test_uses_conn_schema_as_database(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn(schema="my_db")
-        mock_mongo = MagicMock()
+    def test_commits_after_execute(self):
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg()
+        mock_conn = MagicMock()
 
         with patch(
             "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=mock_conn_cfg,
         ), patch(
-            "orchestration.operators.metric_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
         ):
-            op._save_checkpoint_mongo("dag", "100")
+            op._save_checkpoint("my_dag", "999")
 
-        mock_mongo.__getitem__.assert_called_once_with("my_db")
+        mock_conn.commit.assert_called_once()
 
-    def test_defaults_to_config_database_when_schema_empty(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn(schema=None)
-        mock_mongo = MagicMock()
+    def test_connection_closed_after_save(self):
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg()
+        mock_conn = MagicMock()
 
         with patch(
             "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=mock_conn_cfg,
         ), patch(
-            "orchestration.operators.metric_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
         ):
-            op._save_checkpoint_mongo("dag", "100")
+            op._save_checkpoint("my_dag", "999")
 
-        mock_mongo.__getitem__.assert_called_once_with("config")
+        mock_conn.close.assert_called_once()
 
-    def test_client_closed_after_upsert(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-
-        with patch(
-            "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
-        ), patch(
-            "orchestration.operators.metric_operator.MongoClient",
-            return_value=mock_mongo,
-        ):
-            op._save_checkpoint_mongo("dag", "100")
-
-        mock_mongo.close.assert_called_once()
-
-    def test_client_closed_even_on_error(self):
-        op = _make_operator(mongo_conn_id="mongo_checkpoint")
-        mock_conn = self._make_mock_conn()
-        mock_mongo = MagicMock()
-        mock_mongo.__getitem__.return_value.__getitem__.return_value.replace_one.side_effect = RuntimeError("write failed")
+    def test_connection_closed_even_on_error(self):
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg()
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value.execute.side_effect = RuntimeError("write failed")
 
         with patch(
             "orchestration.operators.metric_operator.BaseHook.get_connection",
-            return_value=mock_conn,
+            return_value=mock_conn_cfg,
         ), patch(
-            "orchestration.operators.metric_operator.MongoClient",
-            return_value=mock_mongo,
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
         ):
             with pytest.raises(RuntimeError):
-                op._save_checkpoint_mongo("dag", "100")
+                op._save_checkpoint("my_dag", "100")
 
-        mock_mongo.close.assert_called_once()
+        mock_conn.close.assert_called_once()
+
+    def test_defaults_port_to_5432_when_zero(self):
+        op = _make_operator(checkpoint_conn_id="postgres_checkpoint")
+        mock_conn_cfg = self._make_mock_conn_cfg(port=0)
+        mock_conn = MagicMock()
+
+        with patch(
+            "orchestration.operators.metric_operator.BaseHook.get_connection",
+            return_value=mock_conn_cfg,
+        ), patch(
+            "orchestration.operators.metric_operator.psycopg2.connect",
+            return_value=mock_conn,
+        ) as mock_connect:
+            op._save_checkpoint("my_dag", "999")
+
+        assert mock_connect.call_args[1]["port"] == 5432
 
 
 # ── _push_redis_metric ────────────────────────────────────────────────────────

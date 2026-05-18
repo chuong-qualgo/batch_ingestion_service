@@ -1,0 +1,48 @@
+# =============================================================================
+# Demo pipeline config — Kafka events → HDFS landing zone
+#
+# Reads a bounded batch snapshot from the Kafka topic `orders-events` and
+# lands the raw messages as Parquet files in HDFS.
+#
+# Each run snapshots messages from startingOffsets up to the current end
+# offsets ("latest" captured at read time), so messages written during the
+# Spark job are not included in the current batch.
+# =============================================================================
+
+read_type:    kafka
+write_type:   hadoop
+metric_type:  kafka_queue
+count_records: false
+
+source:
+  credential_ref: data-platform/kafka     # OpenBao key — injects bootstrap_servers
+  topic: orders-events                    # Kafka topic to consume
+  group_id: batch-ingestion               # consumer group id
+  starting_offsets: earliest              # "earliest" | "latest" | JSON offset map
+  value_format: json                      # "json" | "string" | "binary"
+  # read_options are passed verbatim to spark.read.option(k, v)
+  # Uncomment to limit messages read per partition per run:
+  # read_options:
+  #   maxOffsetsPerTrigger: 100000
+  #   minPartitions: 4
+
+sink:
+  credential_ref: data-platform/hadoop
+  source_system_name: kafka-demo          # appears in the HDFS output path
+  file_format: parquet                    # parquet | json | csv | avro | orc | delta | text
+
+metric:
+  credential_ref: data-platform/kafka
+  topic: pipeline-metrics
+  key: batch-ingestion
+
+spark:
+  spark.master: spark://spark-master:7077
+  spark.sql.shuffle.partitions: "4"
+  spark.executor.memory: 1g
+  spark.driver.memory: 2g
+  spark.driver.maxResultSize: 2g
+  spark.network.timeout: 600s
+  spark.executor.heartbeatInterval: 60s
+  # Kafka connector package — must match the Spark version in the Docker image
+  spark.jars.packages: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0

@@ -13,6 +13,8 @@ class ReadAdapterType(str, Enum):
     # File / Cloud Storage
     FILE      = "file"       # Hadoop HDFS (default File)
     S3        = "s3"
+    # Streaming (batch snapshot)
+    KAFKA     = "kafka"
 
 
 class WriteAdapterType(str, Enum):

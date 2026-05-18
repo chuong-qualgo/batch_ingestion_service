@@ -58,7 +58,7 @@ with DAG(
     init = InitOperator(
         task_id="init",
         config_path=_CONFIG_PATH,
-        mongo_conn_id="mongo_checkpoint",
+        checkpoint_conn_id="postgres_checkpoint",
         openbao_conn_id="openbao_default",
         xcom_key="run_context",
     )
@@ -67,7 +67,7 @@ with DAG(
         task_id="spark_run",
         init_task_id="init",
         xcom_key="run_context",
-        mongo_conn_id="mongo_checkpoint",
+        checkpoint_conn_id="postgres_checkpoint",
         metric_type=_METRIC_TYPE,
         metric_config_raw=_METRIC_CONFIG,
         spark_config={

@@ -1,6 +1,6 @@
 # File Landing Service
 
-A batch ingestion data framework built on **Apache Spark** and **Apache Airflow**. It reads data from various sources, lands it to a configured sink, and publishes a metric event on completion. All secrets are managed by **OpenBao** (open-source Vault fork).
+A batch ingestion data framework built on **Apache Spark** and **Apache Airflow**. It reads data from various sources, lands it to a configured sink, and publishes a metric event on completion. All secrets are managed by **OpenBao** (open-source Vault fork). Checkpoints are stored in **PostgreSQL**.
 
 ---
 
@@ -16,6 +16,7 @@ A batch ingestion data framework built on **Apache Spark** and **Apache Airflow*
 - [Secret Management](#secret-management)
 - [Adding a New Pipeline](#adding-a-new-pipeline)
 - [Extending the Framework](#extending-the-framework)
+- [Running the Demo](#running-the-demo)
 - [Running Tests](#running-tests)
 - [Dependencies](#dependencies)
 
@@ -24,16 +25,18 @@ A batch ingestion data framework built on **Apache Spark** and **Apache Airflow*
 ## Architecture Overview
 
 ```
-Airflow DAG
+Airflow DAG (created by dag_factory.py from YAML config)
   │
   ├── InitOperator          → loads YAML config, fetches credentials from OpenBao,
-  │                           reads checkpoint from MongoDB, pushes RunContext to XCom
+  │                           reads checkpoint_from from PostgreSQL,
+  │                           queries MAX(checkpoint_column) from source as checkpoint_to,
+  │                           pushes RunContext to XCom
   │
-  ├── SparkRunOperator      → reads RunContext from XCom, runs Spark read → write,
-  │                           saves checkpoint to MongoDB
+  ├── SparkRunOperator      → reads RunContext from XCom, runs Spark read → write
   │                           (on failure: publishes inline metric via push_metric_inline)
   │
-  └── MetricPushOperator    → publishes pipeline completion metric to Redis or SQS
+  └── MetricPushOperator    → publishes pipeline completion metric to Redis, SQS, or Kafka
+                              saves checkpoint_to to PostgreSQL
 ```
 
 Data flows from **source → Spark engine → sink** on every DAG run. Incremental ingestion is driven by a **checkpoint column** — on the first run the full table is read; subsequent runs read only rows newer than the last saved checkpoint.
@@ -43,7 +46,7 @@ Data flows from **source → Spark engine → sink** on every DAG run. Increment
 ## Project Structure
 
 ```
-file_landing_service/
+batch_ingestion_service/
 │
 ├── adapters/
 │   ├── source/                         # PySpark source adapters
@@ -73,7 +76,8 @@ file_landing_service/
 │   ├── metric/                         # Plain Python metric publishers (no Spark)
 │   │   ├── base_metric_adapter.py      # Abstract base + MetricConfig hierarchy
 │   │   ├── sqs_queue_adapter.py        # AWS SQS publisher
-│   │   └── redis_queue_adapter.py      # Redis Streams publisher
+│   │   ├── redis_queue_adapter.py      # Redis Streams publisher
+│   │   └── kafka_queue_adapter.py      # Apache Kafka publisher
 │   │
 │   └── factory/                        # Factories — config and adapter creation
 │       ├── adapter_config.py           # Enums: ReadAdapterType, WriteAdapterType, MetricAdapterType
@@ -81,32 +85,53 @@ file_landing_service/
 │       ├── sink_config_factory.py      # Builds SinkConfig with full validation
 │       ├── read_adapter_factory.py     # Registry of all 7 source adapters
 │       ├── write_adapter_factory.py    # Registry of 2 sink adapters
-│       ├── metric_adapter_factory.py   # Registry of 2 metric adapters
+│       ├── metric_adapter_factory.py   # Registry of 3 metric adapters
 │       └── adapter_factory.py          # Top-level facade
 │
 ├── orchestration/
 │   ├── operators/
 │   │   ├── init_operator.py            # Step 1: load config, fetch creds, build RunContext
 │   │   ├── spark_run_operator.py       # Step 2: run Spark pipeline
-│   │   ├── metric_operator.py          # Step 3: publish metric + inline failure helper
+│   │   ├── metric_operator.py          # Step 3: publish metric + save checkpoint to PostgreSQL
 │   │   └── run_context.py              # XCom envelope passed between operators
 │   ├── plugins/
 │   │   └── openbao_hook.py             # Airflow hook → OpenBao via Kubernetes auth
 │   └── template_dags/
 │       └── file_landing_dag.py         # Template DAG: init >> spark_run >> metric_push
 │
-├── config/                             # Global settings (placeholder)
+├── config/                             # Global settings
+│   ├── settings.py
+│   ├── spark_config.py
+│   └── vault_config.py
 │
 ├── tests/
 │   ├── conftest.py                     # Shared pytest fixtures
 │   ├── unit/
 │   │   ├── adapters/source/            # SQL, NoSQL, File adapter unit tests
 │   │   ├── adapters/write/             # Hadoop, S3 sink adapter unit tests
-│   │   ├── adapters/metric/            # SQS (moto), Redis (fakeredis) unit tests
-│   │   └── orchestration/              # InitOperator + RunContext unit tests
+│   │   ├── adapters/metric/            # SQS (moto), Redis (fakeredis), Kafka unit tests
+│   │   └── orchestration/              # InitOperator, MetricPushOperator, OpenBaoHook unit tests
 │   └── integration/
 │       └── test_full_pipeline.py       # End-to-end operator wiring tests
 │
+├── demo/
+│   ├── airflow/
+│   │   ├── Dockerfile
+│   │   ├── entrypoint.sh
+│   │   ├── dags/
+│   │   │   ├── dag_factory.py          # Auto-discovers YAML configs → one DAG per file
+│   │   │   └── demo_postgres_to_hadoop.py
+│   │   └── config/
+│   │       └── pipeline_config.yaml    # Demo pipeline: PostgreSQL → HDFS → Kafka
+│   ├── hadoop/                         # Hadoop NameNode/DataNode Dockerfile + entrypoint
+│   ├── spark/                          # Spark master/worker Dockerfile
+│   ├── hadoop-config/                  # core-site.xml, hdfs-site.xml, hadoop.env
+│   ├── openbao/                        # OpenBao config + auto-init scripts
+│   ├── postgres-init/                  # DDL (01_schema.sql) + seed data (02_seed.sql)
+│   ├── mongo-init/                     # MongoDB init script (for source adapter demo)
+│   └── README.md
+│
+├── docker-compose.yml
 ├── requirements-test.txt
 ├── pytest.ini
 └── README.md
@@ -131,33 +156,36 @@ init >> spark_run >> metric_push
 | 1 | Load and parse the YAML pipeline config file |
 | 2 | Build `SourceConfig` from the `source:` section via `SourceConfigFactory` |
 | 3 | Build `SinkConfig` from the `sink:` section, binding `ingestion_date`, `ingestion_time`, `run_id` from the Airflow context |
-| 4 | Fetch **source** credentials from OpenBao |
-| 5 | Fetch **sink** credentials from OpenBao |
+| 4 | Fetch **source** credentials from OpenBao; inject host/port (or path) into `SourceConfig` |
+| 5 | Fetch **sink** credentials from OpenBao; inject endpoint into `SinkConfig` |
 | 6 | Fetch **metric** credentials from OpenBao |
-| 7 | Fetch `checkpoint_from` from MongoDB keyed by `dag_id` — `None` triggers a full read |
-| 8 | Log source record/file count for observability |
+| 7 | Fetch `checkpoint_from` from PostgreSQL (`public.checkpoints`) keyed by `dag_id` — `None` triggers a full read |
+| 8 | Query `MAX(checkpoint_column)` from source using a native lightweight client (no Spark) as `checkpoint_to` |
 | 9 | Assemble `RunContext` and push to XCom |
 
-### SparkRunOperator — 10 steps
+### SparkRunOperator — 9 steps
 
 | Step | Action |
 |------|--------|
 | 1 | Pull `RunContext` from XCom |
-| 2 | Build `SparkSession` with adaptive query execution enabled |
+| 2 | Build `SparkSession` with adaptive query execution enabled (uses `spark:` config from YAML if provided) |
 | 3 | Instantiate source adapter via `ReadAdapterFactory` |
 | 4 | Instantiate sink adapter via `WriteAdapterFactory` |
 | 5 | `validate_connection()` on source |
 | 6 | `validate_connection()` on sink |
 | 7 | `apply_filters()` — pushdown predicates to source |
-| 8 | `read()` → `DataFrame` (respects `checkpoint_from`) |
+| 8 | `read()` → `DataFrame` (bounded by `checkpoint_from` / `checkpoint_to`) |
 | 9 | `write(df)` → `pre_write → write → post_write` |
-| 10 | Upsert `checkpoint_to` to MongoDB |
 
 On any exception: `push_metric_inline()` fires with `status=failed` (non-fatal), then re-raises.
 
-### MetricPushOperator
+### MetricPushOperator — 3 steps
 
-Pulls `RunContext` from XCom, enriches the payload with pipeline metadata, then publishes to the configured queue.
+| Step | Action |
+|------|--------|
+| 1 | Pull `RunContext` from XCom; enrich payload with pipeline metadata |
+| 2 | Publish metric event to the configured queue (SQS, Redis Streams, or Kafka) |
+| 3 | Upsert `checkpoint_to` to PostgreSQL (`public.checkpoints`) keyed by `dag_id` |
 
 ---
 
@@ -184,44 +212,53 @@ Pulls `RunContext` from XCom, enriches the payload with pipeline metadata, then 
 
 ### Metric adapters (`metric_type`)
 
-| `metric_type`   | Concrete class        | Protocol                    |
-|-----------------|-----------------------|-----------------------------|
-| `cloud_queue`   | `SQSQueueAdapter`     | AWS SQS standard queue      |
-| `onprem_queue`  | `RedisQueueAdapter`   | Redis Streams (`XADD`)      |
+| `metric_type`   | Concrete class        | Protocol                           |
+|-----------------|-----------------------|------------------------------------|
+| `cloud_queue`   | `SQSQueueAdapter`     | AWS SQS standard queue             |
+| `onprem_queue`  | `RedisQueueAdapter`   | Redis Streams (`XADD`)             |
+| `kafka_queue`   | `KafkaQueueAdapter`   | Apache Kafka (SASL/PLAIN optional) |
 
 ---
 
 ## Pipeline Configuration
 
-Each pipeline is defined by a YAML config file. The `InitOperator` loads this file at runtime.
+Each pipeline is defined by a YAML config file. The `InitOperator` loads this file at runtime. `dag_factory.py` auto-discovers all `*.yaml` files in the config directory and creates one Airflow DAG per file.
 
-### SQL / NoSQL source → HDFS sink → Redis metric
+### SQL source → HDFS sink → Kafka metric
 
 ```yaml
 read_type: sql
 write_type: hadoop
-metric_type: onprem_queue
+metric_type: kafka_queue
+count_records: false   # set true to count rows (costs an extra Spark scan)
 
 source:
   credential_ref: data-processor/postgres   # OpenBao secret path
-  host: pg-host.internal
-  port: 5432
   database: orders_db
   schema: public
   table: orders
   checkpoint_column: updated_at             # omit for full read every run
+  # read_options are passed verbatim to spark.read.option(k, v)
+  # read_options:
+  #   numPartitions: 8
+  #   partitionColumn: id
+  #   lowerBound: 1
+  #   upperBound: 1000000
 
 sink:
   credential_ref: data-platform/hadoop
-  endpoint: hdfs://namenode:9000
   source_system_name: postgres-prod         # appears in the output path
+  file_format: parquet                      # parquet | json | csv | avro | orc | delta | text
 
 metric:
-  credential_ref: data-platform/redis
-  host: redis.infra.svc.cluster.local
-  port: 6379
-  stream_name: pipeline-metrics
-  max_len: 5000                             # trim stream; omit for unbounded
+  credential_ref: data-platform/kafka
+  topic: pipeline-metrics
+  key: batch-ingestion                      # optional Kafka message key
+
+spark:                                      # optional — passed to SparkSession builder
+  spark.master: spark://spark-master:7077
+  spark.sql.shuffle.partitions: "4"
+  spark.executor.memory: 1g
 ```
 
 ### S3 source → S3 sink → SQS metric
@@ -241,6 +278,7 @@ sink:
   credential_ref: data-platform/s3
   endpoint: s3://landing-bucket
   source_system_name: sftp-partner
+  file_format: parquet
 
 metric:
   credential_ref: data-platform/sqs
@@ -248,7 +286,7 @@ metric:
   aws_region: ap-southeast-1
 ```
 
-### MySQL source with a custom query (no checkpoint)
+### MySQL source → HDFS sink → Redis metric (with custom query)
 
 ```yaml
 read_type: mysql
@@ -257,8 +295,6 @@ metric_type: onprem_queue
 
 source:
   credential_ref: data-processor/mysql
-  host: mysql-host.internal
-  port: 3306
   database: crm
   schema: dbo
   table: customers
@@ -267,15 +303,28 @@ source:
 
 sink:
   credential_ref: data-platform/hadoop
-  endpoint: hdfs://namenode:9000
   source_system_name: mysql-crm
+  file_format: parquet
 
 metric:
   credential_ref: data-platform/redis
   host: redis.infra.svc.cluster.local
   port: 6379
   stream_name: pipeline-metrics
+  max_len: 5000                             # trim stream; omit for unbounded
 ```
+
+### DAG metadata (optional top-level YAML fields)
+
+| Field                  | Default         | Description                           |
+|------------------------|-----------------|---------------------------------------|
+| `schedule_interval`    | `None`          | Cron expression or `@daily` etc.      |
+| `owner`                | `"ingestion"`   | Airflow task owner                    |
+| `retries`              | `0`             | Number of automatic retries           |
+| `retry_delay_minutes`  | `5`             | Delay between retries                 |
+| `tags`                 | `["ingestion"]` | Airflow DAG tags                      |
+| `description`          | auto            | Shown in Airflow UI                   |
+| `count_records`        | `false`         | Count rows before reading (extra scan)|
 
 ---
 
@@ -320,41 +369,53 @@ Checkpointing enables **incremental ingestion** — only rows newer than the las
 ### Checkpoint lifecycle
 
 ```
-Run 1:  checkpoint_from = None              → full table read
-        checkpoint_to   = "2024-01-15 14:30:00"  → saved to MongoDB
+Run 1:  checkpoint_from = None                   → full table read
+        checkpoint_to   = "2024-01-15 14:30:00"  → saved to PostgreSQL by MetricPushOperator
 
 Run 2:  checkpoint_from = "2024-01-15 14:30:00"  → incremental read
-        checkpoint_to   = "2024-01-16 09:00:00"  → saved to MongoDB
+        checkpoint_to   = "2024-01-16 09:00:00"  → saved to PostgreSQL by MetricPushOperator
 
 Run 3:  checkpoint_from = "2024-01-16 09:00:00"  → incremental read
         ...
 ```
 
-### MongoDB checkpoint document
+### PostgreSQL checkpoint table
 
-```json
-{
-  "dag_id": "file_landing_pipeline",
-  "checkpoint_from": "2024-01-15 14:30:00",
-  "updated_at": "2024-01-15T14:31:05.123Z"
-}
+```sql
+CREATE TABLE public.checkpoints (
+    dag_id         TEXT PRIMARY KEY,
+    checkpoint_to  TEXT NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
-One document per `dag_id`, upserted after every successful run.
+One row per `dag_id`, upserted by `MetricPushOperator` after every successful run.
 
 ### Disabling checkpoints
 
-Simply omit `checkpoint_column` from the YAML source section. The full table or path is read every run and nothing is written to MongoDB.
+Simply omit `checkpoint_column` from the YAML source section. The full table or path is read every run and nothing is written to PostgreSQL.
 
 ### How filters are applied per source type
 
-| Source     | Filter mechanism                                                        |
-|------------|-------------------------------------------------------------------------|
-| SQL/MySQL  | `WHERE {checkpoint_column} > '{checkpoint_from}'` appended to JDBC query |
-| MongoDB    | `$match` stage in aggregation pipeline                                  |
-| DynamoDB   | Post-load `DataFrame.filter()` after Spark read                         |
-| Cassandra  | CQL `WHERE` clause pushed down via connector                            |
-| HDFS / S3  | Post-load `DataFrame.filter()` on the checkpoint column                 |
+| Source     | Filter mechanism                                                          |
+|------------|---------------------------------------------------------------------------|
+| SQL/MySQL  | `WHERE {checkpoint_column} > '{checkpoint_from}'` appended to JDBC query  |
+| MongoDB    | `$match` stage in aggregation pipeline                                    |
+| DynamoDB   | Post-load `DataFrame.filter()` after Spark read                           |
+| Cassandra  | CQL `WHERE` clause pushed down via connector                              |
+| HDFS / S3  | Post-load `DataFrame.filter()` on the checkpoint column                   |
+
+### How `checkpoint_to` is determined (InitOperator, no Spark)
+
+`InitOperator` queries `MAX(checkpoint_column)` from the source using a native lightweight client before the Spark job starts. This bounds the read window so each run has a deterministic upper limit.
+
+| Source     | Method                                                    |
+|------------|-----------------------------------------------------------|
+| SQL/MySQL  | `SELECT MAX(col)` via `psycopg2` / `pymysql`              |
+| MongoDB    | `$group $max` aggregation via `pymongo`                   |
+| DynamoDB   | Scan with `ProjectionExpression` via `boto3`              |
+| Cassandra  | `SELECT MAX(col)` via `cassandra-driver`                  |
+| HDFS / S3  | Latest file modification time (proxy for file sources)    |
 
 ---
 
@@ -402,6 +463,10 @@ bao kv put secret/data-processor/postgres \
 bao kv put secret/data-platform/hadoop \
   hdfs_user=hadoop
 
+bao kv put secret/data-platform/kafka \
+  bootstrap_servers=kafka:9092
+  # sasl_username=user sasl_password=pass   # add for SASL/PLAIN auth
+
 bao kv put secret/data-platform/redis \
   password=redispassword
 
@@ -422,28 +487,27 @@ Create an Airflow connection with ID `openbao_default`:
 | Port      | `8200`                                        |
 | Schema    | `airflow` (the Kubernetes auth role name)     |
 
-### Required Airflow connection (MongoDB checkpoint store)
+### Required Airflow connection (PostgreSQL checkpoint store)
 
-Create an Airflow connection with ID `mongo_checkpoint`:
+Create an Airflow connection with ID `postgres_checkpoint`:
 
-| Field    | Value                          |
-|----------|--------------------------------|
-| Conn Type | MongoDB                       |
-| Host     | MongoDB hostname               |
-| Port     | `27017`                        |
-| Login    | MongoDB username               |
-| Password | MongoDB password               |
-| Schema   | Database name (e.g. `config`)  |
+| Field     | Value                          |
+|-----------|--------------------------------|
+| Conn Type | Postgres                       |
+| Host      | PostgreSQL hostname            |
+| Port      | `5432`                         |
+| Login     | PostgreSQL username            |
+| Password  | PostgreSQL password            |
+| Schema    | Database name (e.g. `config`)  |
 
 ---
 
 ## Adding a New Pipeline
 
-1. Copy `orchestration/template_dags/file_landing_dag.py` to a new file, e.g. `mysql_crm_dag.py`
-2. Change `dag_id` and `schedule_interval`
-3. Create a YAML config file under `config/` (e.g. `mysql_crm.yaml`)
-4. Write the secret to OpenBao for the new source
-5. Deploy the DAG to your Airflow instance
+1. Create a YAML config file in your config directory (e.g. `mysql_crm.yaml`)
+2. `dag_factory.py` automatically detects and registers a new Airflow DAG named `mysql_crm`
+3. Write the secret to OpenBao for the new source
+4. Set `schedule_interval` in the YAML for recurring runs
 
 No code changes are needed for any source/sink combination already listed in [Supported Sources and Sinks](#supported-sources-and-sinks).
 
@@ -462,11 +526,11 @@ No code changes are needed for any source/sink combination already listed in [Su
 
 3. Implement the required methods:
 
-   | Parent class   | Required methods                                      |
-   |----------------|-------------------------------------------------------|
-   | `SQLAdapter`   | `driver` (property), `_build_jdbc_url()`              |
+   | Parent class   | Required methods                                         |
+   |----------------|----------------------------------------------------------|
+   | `SQLAdapter`   | `driver` (property), `_build_jdbc_url()`                 |
    | `NoSQLAdapter` | `spark_format` (property), `_build_connection_options()` |
-   | `FileAdapter`  | `_configure_spark_for_filesystem()`                   |
+   | `FileAdapter`  | `_configure_spark_for_filesystem()`                      |
 
 4. Add a new value to `ReadAdapterType` in `adapter_config.py`
 
@@ -481,11 +545,8 @@ No code changes are needed for any source/sink combination already listed in [Su
 ```python
 # adapters/source/sql/source_bigquery_adapter.py
 from adapters.source.sql_adapter import SQLAdapter
-from adapters.source.base_read_adapter import TableSourceConfig
 
 class SourceBigQueryAdapter(SQLAdapter):
-    """Reads from BigQuery via Spark BigQuery connector."""
-
     @property
     def driver(self) -> str:
         return "com.simba.googlebigquery.jdbc.Driver"
@@ -527,13 +588,45 @@ _registry = {
 
 ---
 
+## Running the Demo
+
+The demo runs a full end-to-end pipeline: **PostgreSQL → Spark → Hadoop HDFS**, with metrics published to **Apache Kafka**.
+
+```bash
+# From the project root
+docker compose up -d
+
+# Wait ~2 minutes for all health checks to pass
+docker compose ps
+
+# Open Airflow UI
+open http://localhost:8080   # admin / admin
+```
+
+### Service URLs
+
+| Service          | URL                      | Credentials                           |
+|------------------|--------------------------|---------------------------------------|
+| Airflow          | http://localhost:8080    | admin / admin                         |
+| Hadoop NameNode  | http://localhost:9870    | —                                     |
+| Hadoop DataNode  | http://localhost:9864    | —                                     |
+| Spark Master     | http://localhost:8090    | —                                     |
+| OpenBao          | http://localhost:8200    | root token in `fls-openbao` logs      |
+| Kafka UI         | http://localhost:8082    | —                                     |
+| pgAdmin          | http://localhost:5050    | admin@example.com / admin_pass        |
+| PostgreSQL       | localhost:5432           | orders_user / orders_pass / orders_db |
+
+The demo DAG (`pipeline_config`) is auto-discovered from `demo/airflow/config/pipeline_config.yaml`. See [demo/README.md](demo/README.md) for a full walkthrough.
+
+---
+
 ## Running Tests
 
 ```bash
 # Install test dependencies
 pip install -r requirements-test.txt
 
-# Run the full suite (133 tests)
+# Run the full suite
 pytest
 
 # Unit tests only
@@ -545,6 +638,7 @@ pytest tests/integration/ -v
 # A specific adapter family
 pytest tests/unit/adapters/source/ -v
 pytest tests/unit/adapters/metric/ -v
+pytest tests/unit/orchestration/ -v
 
 # With coverage
 pip install pytest-cov
@@ -553,21 +647,24 @@ pytest --cov=adapters --cov=orchestration --cov-report=term-missing
 
 ### Test breakdown
 
-| Suite       | File                              | Tests | Key mocks                    |
-|-------------|-----------------------------------|-------|------------------------------|
-| Unit        | `test_sql_adapter.py`             | 12    | MagicMock (Spark JDBC)       |
-| Unit        | `test_nosql_adapter.py`           | 17    | MagicMock, boto3 patch       |
-| Unit        | `test_file_adapter.py`            | 10    | MagicMock (Hadoop FS API)    |
-| Unit        | `test_factory.py`                 | 25    | MagicMock                    |
-| Unit        | `test_hadoop_adapter.py`          | 12    | MagicMock (Spark writer)     |
-| Unit        | `test_cloud_storage_adapter.py`   | 8     | MagicMock, moto (S3)         |
-| Unit        | `test_sqs_queue_adapter.py`       | 8     | moto `mock_aws` (real SQS)   |
-| Unit        | `test_redis_queue_adapter.py`     | 11    | fakeredis (real XADD)        |
-| Unit        | `test_init_operator.py`           | 14    | MagicMock (Airflow, OpenBao) |
-| Integration | `test_full_pipeline.py`           | 21    | All of the above             |
-| **Total**   |                                   | **133** |                            |
+| Suite       | File                              | Tests | Key mocks                               |
+|-------------|-----------------------------------|-------|-----------------------------------------|
+| Unit        | `test_sql_adapter.py`             | 17    | MagicMock (Spark JDBC)                  |
+| Unit        | `test_nosql_adapter.py`           | 15    | MagicMock, boto3 patch                  |
+| Unit        | `test_file_adapter.py`            | 9     | MagicMock (Hadoop FS API)               |
+| Unit        | `test_factory.py`                 | 13    | MagicMock                               |
+| Unit        | `test_hadoop_adapter.py`          | 13    | MagicMock (Spark writer)                |
+| Unit        | `test_cloud_storage_adapter.py`   | 6     | MagicMock, moto (S3)                    |
+| Unit        | `test_sqs_queue_adapter.py`       | 7     | moto `mock_aws` (real SQS)              |
+| Unit        | `test_redis_queue_adapter.py`     | 11    | fakeredis (real XADD)                   |
+| Unit        | `test_kafka_queue_adapter.py`     | 16    | kafka-python mock                       |
+| Unit        | `test_init_operator.py`           | 27    | MagicMock (Airflow, OpenBao, psycopg2)  |
+| Unit        | `test_metric_operator.py`         | 39    | MagicMock (Airflow, psycopg2)           |
+| Unit        | `test_openbao_hook.py`            | 36    | MagicMock (hvac, Kubernetes)            |
+| Integration | `test_full_pipeline.py`           | 21    | All of the above                        |
+| **Total**   |                                   | **230** |                                       |
 
-All external I/O (Spark, MongoDB, OpenBao, SQS, Redis) is mocked at the boundary — no real infrastructure is needed to run the test suite.
+All external I/O (Spark, PostgreSQL, OpenBao, SQS, Redis, Kafka) is mocked at the boundary — no real infrastructure is needed to run the test suite.
 
 ---
 
@@ -580,18 +677,21 @@ All external I/O (Spark, MongoDB, OpenBao, SQS, Redis) is mocked at the boundary
 | `apache-airflow`   | DAG orchestration and operator base classes |
 | `pyspark`          | Spark engine for read and write             |
 | `hvac`             | OpenBao / Vault Python client               |
-| `pymongo`          | MongoDB checkpoint read/write               |
+| `psycopg2`         | PostgreSQL checkpoint read/write            |
+| `pymongo`          | MongoDB source adapter                      |
 | `boto3`            | AWS SQS, S3, and DynamoDB                   |
 | `redis`            | Redis Streams metric publisher              |
+| `kafka-python`     | Apache Kafka metric publisher               |
 | `cassandra-driver` | Cassandra connection validation             |
 | `PyYAML`           | Pipeline config file parsing                |
 
 ### Test only
 
-| Package       | Purpose                                        |
-|---------------|------------------------------------------------|
-| `pytest`      | Test runner                                    |
-| `pytest-mock` | MagicMock integration                          |
-| `moto`        | AWS service mocks — SQS, S3, DynamoDB          |
-| `fakeredis`   | In-memory Redis mock (full XADD/XRANGE support)|
-| `mongomock`   | In-memory MongoDB mock                         |
+| Package       | Purpose                                         |
+|---------------|-------------------------------------------------|
+| `pytest`      | Test runner                                     |
+| `pytest-mock` | MagicMock integration                           |
+| `moto`        | AWS service mocks — SQS, S3, DynamoDB           |
+| `fakeredis`   | In-memory Redis mock (full XADD/XRANGE support) |
+| `mongomock`   | In-memory MongoDB mock                          |
+| `kafka-python`| Kafka client (used in tests with mocking)       |

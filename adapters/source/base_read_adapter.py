@@ -7,7 +7,7 @@ from typing import Optional, Union
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import StructType
 
-CheckpointValue = Union[int, datetime]
+CheckpointValue = Union[int, datetime, str]
 
 
 # ── Source config hierarchy ───────────────────────────────────────────────
@@ -95,6 +95,39 @@ class PathSourceConfig(SourceConfig):
     path: str = ""
     file_format: FileFormat = FileFormat.PARQUET
     checkpoint_column: Optional[str] = None
+
+
+@dataclass
+class KafkaSourceConfig(SourceConfig):
+    """
+    Config for Apache Kafka batch snapshot reads (spark.read.format("kafka")).
+
+    bootstrap_servers is intentionally absent here — it is stored in OpenBao
+    and injected into this config by InitOperator after the secret is fetched.
+
+    Attributes
+    ----------
+    bootstrap_servers : str
+        Comma-separated broker list — populated from OpenBao secret at runtime.
+        Example: broker1:9092,broker2:9092
+    topic : str
+        Kafka topic (or comma-separated topic list) to read from.
+    group_id : str
+        Consumer group id — used for offset tracking on the broker side.
+    starting_offsets : str
+        Where to start reading: "earliest", "latest", or a JSON offset map.
+        Overridden at runtime by checkpoint_from when a prior run has completed.
+    value_format : str
+        How to decode message values: "json", "string", or "binary".
+        "json"   — parses value bytes as a JSON object (schema required or inferred)
+        "string" — casts value bytes to a UTF-8 string column
+        "binary" — leaves value as raw BinaryType (passthrough)
+    """
+    bootstrap_servers: str = ""
+    topic: str = ""
+    group_id: str = ""
+    starting_offsets: str = "earliest"
+    value_format: str = "json"
 
 
 # ── Base adapter ──────────────────────────────────────────────────────────

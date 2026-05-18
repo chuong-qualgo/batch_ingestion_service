@@ -9,6 +9,7 @@ from adapters.source.nosql.source_dynamodb_adapter import SourceDynamoDBAdapter
 from adapters.source.nosql.source_mongodb_adapter import SourceMongoDBAdapter
 from adapters.source.sql.source_mysql_adapter import SourceMySQLAdapter
 from adapters.source.sql.source_postgres_adapter import SourcePostgresAdapter
+from adapters.source.stream.source_kafka_adapter import SourceKafkaAdapter
 
 
 class ReadAdapterFactory:
@@ -25,6 +26,7 @@ class ReadAdapterFactory:
     ReadAdapterType.CASSANDRA  → SourceCassandraAdapter
     ReadAdapterType.FILE       → SourceHadoopAdapter    (default File)
     ReadAdapterType.S3         → SourceS3Adapter
+    ReadAdapterType.KAFKA      → SourceKafkaAdapter
 
     Raises
     ------
@@ -40,6 +42,7 @@ class ReadAdapterFactory:
         ReadAdapterType.CASSANDRA: SourceCassandraAdapter,
         ReadAdapterType.FILE:      SourceHadoopAdapter,
         ReadAdapterType.S3:        SourceS3Adapter,
+        ReadAdapterType.KAFKA:     SourceKafkaAdapter,
     }
 
     @classmethod

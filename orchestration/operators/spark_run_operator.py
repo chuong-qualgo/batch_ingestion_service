@@ -52,7 +52,7 @@ class SparkRunOperator(BaseOperator):
     xcom_key : str
         XCom key to pull RunContext from. Defaults to 'run_context'.
     checkpoint_conn_id : str
-        Airflow connection id for MongoDB checkpoint store (kept for
+        Airflow connection id for the PostgreSQL checkpoint store (kept for
         future use but checkpoint writes now handled by MetricPushOperator).
     spark_app_name : str, optional
         SparkSession app name. Defaults to dag_id at runtime.
@@ -72,7 +72,7 @@ class SparkRunOperator(BaseOperator):
         self,
         init_task_id: str,
         xcom_key: str = "run_context",
-        checkpoint_conn_id: str = "mongo_checkpoint",
+        checkpoint_conn_id: str = "postgres_checkpoint",
         spark_app_name: Optional[str] = None,
         spark_config: Optional[dict] = None,
         metric_type: Optional[MetricAdapterType] = None,
